@@ -1,0 +1,64 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcworkspace/contents.xcworkspacedata
+!default.xcworkspace
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Build products
+build/
+Build/
+
+# CocoaPods (not used, just in case)
+Pods/
+Podfile.lock
+
+# Carthage (not used, just in case)
+Carthage/Build/
+Carthage/Checkouts/
+
+# Fastlane (not used, just in case)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.nvim/
+.cursor/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+secrets.json
+
+# Claude Code local working files
+.claude/settings.local.json
