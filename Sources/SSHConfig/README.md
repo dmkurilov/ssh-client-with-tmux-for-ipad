@@ -10,17 +10,17 @@ See `Tests/SSHConfigTests/IncludeTests.swift` for usage examples.
 
 ```
    text
-     │
-     ▼
- ┌───────┐  lines        ┌────────┐                  ┌────────┐
- │ Lexer │ ─────────────▶│ Parser │ ────[Block]────▶ │Resolver│
- └───────┘               └────────┘                  └────────┘
-                             ▲                             │
-                             │ Include                     ▼
-                             │                      ResolvedConfig
-                        ┌──────────┐                       │
-                        │FileLoader│                       ▼
-                        └──────────┘                TokenExpander
+     |
+     v
+ +-------+  lines        +--------+                  +--------+
+ | Lexer | ------------->| Parser | ----[Block]----> |Resolver|
+ +-------+               +--------+                  +--------+
+                             ^                             |
+                             | Include                     v
+                             |                      ResolvedConfig
+                        +----------+                       |
+                        |FileLoader|                       v
+                        +----------+                TokenExpander
                                                      (per-keyword,
                                                       caller-driven)
 ```

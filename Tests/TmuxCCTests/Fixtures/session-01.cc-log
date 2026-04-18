@@ -1,0 +1,18 @@
+%begin 1776537123 271 0
+%end 1776537123 271 0
+%window-add @0
+%sessions-changed
+%session-changed $0 cc-record
+%begin 1776537123 277 1
+parse error: unknown command: new-window
+%error 1776537123 277 1
+%begin 1776537123 278 1
+%end 1776537123 278 1
+%begin 1776537123 279 1
+%end 1776537123 279 1
+%begin 1776537123 280 1
+%end 1776537123 280 1
+%window-pane-changed @0 %1
+%layout-change @0 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} *
+%sessions-changed
+%exit

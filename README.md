@@ -46,9 +46,14 @@ A single root `Package.swift` with multiple library products is used
 (one target per module) rather than separate packages per folder. Same
 modularity, simpler CI, one `swift test` to cover everything.
 
-## Building
+## Requirements
 
-Requirements: Swift 5.9+ (Xcode 15+) / iPadOS 17+ for the app.
+- **Client**: iPadOS 17+.
+- **Build**: Swift 5.9+ (Xcode 15+).
+- **Remote server**: tmux 3.2+ (for a complete `-CC` control-mode
+  protocol). Older versions are unsupported.
+
+## Building
 
 ```bash
 swift build
