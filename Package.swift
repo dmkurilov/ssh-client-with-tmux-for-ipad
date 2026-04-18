@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "SSHConfig", targets: ["SSHConfig"]),
         .library(name: "TmuxCC", targets: ["TmuxCC"]),
+        .library(name: "ColorSchemes", targets: ["ColorSchemes"]),
     ],
     targets: [
         .target(
@@ -34,6 +35,16 @@ let package = Package(
             path: "Tests/TmuxCCTests",
             exclude: ["README.md"],
             resources: [.copy("Fixtures")]
+        ),
+        .target(
+            name: "ColorSchemes",
+            path: "Sources/ColorSchemes",
+            exclude: ["README.md"]
+        ),
+        .testTarget(
+            name: "ColorSchemesTests",
+            dependencies: ["ColorSchemes"],
+            path: "Tests/ColorSchemesTests"
         ),
     ]
 )
