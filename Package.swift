@@ -11,6 +11,13 @@ let package = Package(
         .library(name: "SSHConfig", targets: ["SSHConfig"]),
         .library(name: "TmuxCC", targets: ["TmuxCC"]),
         .library(name: "ColorSchemes", targets: ["ColorSchemes"]),
+        .library(name: "SSHCore", targets: ["SSHCore"]),
+    ],
+    dependencies: [
+        // De-risking step: only `SSHCore` uses this for now. If SPM cannot
+        // resolve the version, check https://github.com/orlandos-nl/Citadel
+        // /releases and adjust the `from:` lower bound.
+        .package(url: "https://github.com/orlandos-nl/Citadel", from: "0.10.0"),
     ],
     targets: [
         .target(
@@ -45,6 +52,13 @@ let package = Package(
             name: "ColorSchemesTests",
             dependencies: ["ColorSchemes"],
             path: "Tests/ColorSchemesTests"
+        ),
+        .target(
+            name: "SSHCore",
+            dependencies: [
+                .product(name: "Citadel", package: "Citadel"),
+            ],
+            path: "Sources/SSHCore"
         ),
     ]
 )

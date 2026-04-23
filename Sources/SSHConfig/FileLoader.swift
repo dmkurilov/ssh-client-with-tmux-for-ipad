@@ -14,7 +14,7 @@ public struct DiskFileLoader: FileLoader {
     private let homeDirectory: URL
 
     public init(homeDirectory: URL? = nil) {
-        self.homeDirectory = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        self.homeDirectory = homeDirectory ?? URL(fileURLWithPath: NSHomeDirectory())
     }
 
     private var fileManager: FileManager { .default }

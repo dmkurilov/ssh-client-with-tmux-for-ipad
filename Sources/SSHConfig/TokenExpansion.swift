@@ -18,7 +18,7 @@ public struct TokenContext: Sendable {
         remoteHost: String? = nil,
         originalHost: String? = nil,
         remotePort: Int? = nil,
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = NSHomeDirectory()
     ) {
         self.localUser = localUser
         self.localHost = localHost

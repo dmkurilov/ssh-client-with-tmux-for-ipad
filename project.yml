@@ -1,0 +1,85 @@
+name: SSHClientTmux
+
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+
+packages:
+  Domain:
+    path: .
+
+targets:
+  SSHClientTmux:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Sources
+    resources:
+      - path: App/Resources/Assets.xcassets
+    postBuildScripts:
+      - name: Copy SmokeTest credentials into bundle
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          # Read from outside the repo so sync mechanisms can't wipe these.
+          SRC="${HOME}/.ssh-client-tmux-smoke"
+          DEST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
+          echo "SmokeTest: source=$SRC"
+          echo "SmokeTest: dest=$DEST"
+          for f in config.json private-key; do
+            if [ -f "$SRC/$f" ]; then
+              cp "$SRC/$f" "$DEST/$f"
+              echo "SmokeTest:   ✓ copied $f"
+            else
+              echo "SmokeTest:   — skipped $f (not at $SRC/$f)"
+            fi
+          done
+    info:
+      path: App/Resources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSFaceIDUsageDescription: Unlocks your SSH private keys when you connect.
+        CFBundleDisplayName: SSH Tmux
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleURLTypes:
+          - CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER).ssh
+            CFBundleURLSchemes:
+              - ssh
+        LSSupportsOpeningDocumentsInPlace: true
+        UIFileSharingEnabled: true
+    dependencies:
+      - package: Domain
+        product: SSHConfig
+      - package: Domain
+        product: TmuxCC
+      - package: Domain
+        product: ColorSchemes
+      - package: Domain
+        product: SSHCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dmkurilov.ssh-client-with-tmux-for-ipad
+        PRODUCT_NAME: SSHClientTmux
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_MACCATALYST: NO
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
