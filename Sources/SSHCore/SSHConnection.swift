@@ -2,6 +2,7 @@ import Foundation
 import Citadel
 import Crypto
 import NIOCore
+import NIOSSH
 
 /// One SSH connection to a remote host. Constructed via the static
 /// `connect(...)` factory; call `exec(_:)` for one-shot commands and
@@ -89,12 +90,11 @@ public actor SSHConnection {
 
     /// Open an interactive shell on the existing connection.
     ///
-    /// `allocatePTY` is accepted for API stability but **not wired
-    /// yet** — the current implementation always opens without a PTY
-    /// via Citadel's `withTTY`. A follow-up commit will use
-    /// `withPTY(...)` and a `PseudoTerminalRequest` to honor this flag
-    /// properly, plus wire `resize(cols:rows:)` through the underlying
-    /// channel.
+    /// `allocatePTY` controls whether the server allocates a pseudo-
+    /// terminal for the session. Default `true` — needed for most
+    /// interactive programs including `tmux -CC` (tmux calls
+    /// `tcgetattr(3)` on startup to read terminal dimensions even
+    /// though it does its own rendering).
     public func openShell(
         allocatePTY: Bool = true,
         termType: String = "xterm-256color",
@@ -102,33 +102,50 @@ public actor SSHConnection {
         rows: Int = 24
     ) async throws -> SSHShellSession {
         guard let client else { throw SSHError.alreadyDisconnected }
-        _ = (allocatePTY, termType, cols, rows)  // TODO: wire withPTY
 
         let (output, outputContinuation) = AsyncThrowingStream<Data, Error>.makeStream()
         let writerBox = TTYWriterBox()
 
-        // Citadel's `withTTY` is scope-based: the channel lives only as
-        // long as the closure runs. Wrap it in an unstructured task so
-        // callers can close the session by cancelling the task.
+        // Shared closure for both withPTY and withTTY — same inbound/
+        // outbound signature either way.
+        let pump: @Sendable (TTYOutput, TTYStdinWriter) async throws -> Void =
+        { inbound, outbound in
+            await writerBox.set(outbound)
+            do {
+                for try await event in inbound {
+                    // Citadel's `ExecCommandOutput` carries stdout + stderr;
+                    // we merge them. Natural end + non-zero exit come
+                    // through as iterator finish/throw already.
+                    switch event {
+                    case .stdout(let buffer), .stderr(let buffer):
+                        outputContinuation.yield(Data(buffer.readableBytesView))
+                    }
+                }
+                outputContinuation.finish()
+            } catch {
+                outputContinuation.finish(throwing: error)
+            }
+        }
+
+        let ptyRequest = SSHChannelRequestEvent.PseudoTerminalRequest(
+            wantReply: true,
+            term: termType,
+            terminalCharacterWidth: cols,
+            terminalRowHeight: rows,
+            terminalPixelWidth: 0,
+            terminalPixelHeight: 0,
+            terminalModes: SSHTerminalModes([:])
+        )
+
+        // Citadel's `withTTY`/`withPTY` are scope-based: the channel
+        // lives only as long as the closure runs. Wrap in an
+        // unstructured task so callers can close by cancelling it.
         let ttyTask = Task.detached {
             do {
-                try await client.withTTY { inbound, outbound in
-                    await writerBox.set(outbound)
-                    do {
-                        for try await event in inbound {
-                            // Citadel's `ExecCommandOutput` is stdout+stderr;
-                            // we merge them into one byte stream. Natural
-                            // end and non-zero exit come through as
-                            // iterator finish/throw already.
-                            switch event {
-                            case .stdout(let buffer), .stderr(let buffer):
-                                outputContinuation.yield(Data(buffer.readableBytesView))
-                            }
-                        }
-                        outputContinuation.finish()
-                    } catch {
-                        outputContinuation.finish(throwing: error)
-                    }
+                if allocatePTY {
+                    try await client.withPTY(ptyRequest, perform: pump)
+                } else {
+                    try await client.withTTY(perform: pump)
                 }
             } catch {
                 outputContinuation.finish(throwing: error)
