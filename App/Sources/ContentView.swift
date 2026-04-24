@@ -8,30 +8,34 @@ struct ContentView: View {
     @State private var isRunning: Bool = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("SSH Client + Tmux")
-                .font(.largeTitle.weight(.semibold))
+        NavigationStack {
+            VStack(spacing: 24) {
+                Text("SSH Client + Tmux")
+                    .font(.largeTitle.weight(.semibold))
 
-            smokeTestPanel
+                smokeTestPanel
 
-            Spacer()
+                Spacer()
 
-            VStack(spacing: 4) {
-                Text("Bundled color schemes: \(BuiltInSchemes.all.count)")
-                Text("Smoke test config: \(SmokeTestConfig.isReady ? "ready" : "missing")")
+                VStack(spacing: 4) {
+                    Text("Bundled color schemes: \(BuiltInSchemes.all.count)")
+                    Text("Smoke test config: \(SmokeTestConfig.isReady ? "ready" : "missing")")
+                }
+                .font(.caption.monospaced())
+                .foregroundStyle(.tertiary)
             }
-            .font(.caption.monospaced())
-            .foregroundStyle(.tertiary)
+            .padding()
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
         }
-        .padding()
     }
 
     @ViewBuilder
     private var smokeTestPanel: some View {
-        if let config = SmokeTestConfig.shared, SmokeTestConfig.privateKeyData != nil {
+        if let config = SmokeTestConfig.shared, let keyData = SmokeTestConfig.privateKeyData {
             VStack(spacing: 12) {
                 Button {
-                    Task { await runSmokeTest(config: config) }
+                    Task { await runSmokeTest(config: config, keyData: keyData) }
                 } label: {
                     HStack {
                         if isRunning { ProgressView() }
@@ -40,6 +44,13 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isRunning)
+
+                NavigationLink {
+                    ShellSmokeView(config: config, keyData: keyData)
+                } label: {
+                    Text("Open shell on \(config.host)")
+                }
+                .buttonStyle(.bordered)
 
                 if let errorMessage {
                     Text(errorMessage)
@@ -67,7 +78,7 @@ struct ContentView: View {
             VStack(spacing: 8) {
                 Text("Smoke test not configured")
                     .font(.headline)
-                Text("Add `config.json` and `private-key` to `App/Resources/SmokeTest/` (see that folder's README), then rebuild.")
+                Text("Create `~/.ssh-client-tmux-smoke/config.json` and `private-key`, then rebuild.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -77,9 +88,7 @@ struct ContentView: View {
         }
     }
 
-    private func runSmokeTest(config: SmokeTestConfig) async {
-        guard let keyData = SmokeTestConfig.privateKeyData else { return }
-
+    private func runSmokeTest(config: SmokeTestConfig, keyData: Data) async {
         isRunning = true
         output = ""
         errorMessage = nil

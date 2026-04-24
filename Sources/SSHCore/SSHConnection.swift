@@ -86,4 +86,78 @@ public actor SSHConnection {
         try? await client?.close()
         client = nil
     }
+
+    /// Open an interactive shell on the existing connection.
+    ///
+    /// `allocatePTY` is accepted for API stability but **not wired
+    /// yet** — the current implementation always opens without a PTY
+    /// via Citadel's `withTTY`. A follow-up commit will use
+    /// `withPTY(...)` and a `PseudoTerminalRequest` to honor this flag
+    /// properly, plus wire `resize(cols:rows:)` through the underlying
+    /// channel.
+    public func openShell(
+        allocatePTY: Bool = true,
+        termType: String = "xterm-256color",
+        cols: Int = 80,
+        rows: Int = 24
+    ) async throws -> SSHShellSession {
+        guard let client else { throw SSHError.alreadyDisconnected }
+        _ = (allocatePTY, termType, cols, rows)  // TODO: wire withPTY
+
+        let (output, outputContinuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let writerBox = TTYWriterBox()
+
+        // Citadel's `withTTY` is scope-based: the channel lives only as
+        // long as the closure runs. Wrap it in an unstructured task so
+        // callers can close the session by cancelling the task.
+        let ttyTask = Task.detached {
+            do {
+                try await client.withTTY { inbound, outbound in
+                    await writerBox.set(outbound)
+                    do {
+                        for try await event in inbound {
+                            // Citadel's `ExecCommandOutput` is stdout+stderr;
+                            // we merge them into one byte stream. Natural
+                            // end and non-zero exit come through as
+                            // iterator finish/throw already.
+                            switch event {
+                            case .stdout(let buffer), .stderr(let buffer):
+                                outputContinuation.yield(Data(buffer.readableBytesView))
+                            }
+                        }
+                        outputContinuation.finish()
+                    } catch {
+                        outputContinuation.finish(throwing: error)
+                    }
+                }
+            } catch {
+                outputContinuation.finish(throwing: error)
+            }
+        }
+
+        return SSHShellSession(
+            output: output,
+            continuation: outputContinuation,
+            writer: { data in
+                guard let writer = await writerBox.get() else {
+                    throw SSHError.channelFailed(
+                        underlying: "shell stdin writer not yet available"
+                    )
+                }
+                try await writer.write(ByteBuffer(bytes: Array(data)))
+            },
+            closer: {
+                ttyTask.cancel()
+            },
+            resizer: nil  // TODO: wire with withPTY
+        )
+    }
+}
+
+/// Thread-safe holder for the stdin writer, which Citadel hands us
+/// asynchronously inside the `withTTY` closure.
+private actor TTYWriterBox {
+    private var writer: TTYStdinWriter?
+    func set(_ w: TTYStdinWriter) { self.writer = w }
+    func get() -> TTYStdinWriter? { writer }
 }
