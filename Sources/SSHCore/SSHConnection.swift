@@ -178,7 +178,19 @@ public actor SSHConnection {
             closer: {
                 ttyTask.cancel()
             },
-            resizer: nil  // TODO: wire with withPTY
+            resizer: { cols, rows in
+                // TODO: confirm Citadel's exact resize API. Best guess
+                // is `TTYStdinWriter.changeSize(cols:rows:pixelWidth:
+                // pixelHeight:)`. If the name lives elsewhere or has a
+                // different signature, we'll see a compile error.
+                let writer = try await writerBox.awaitReady()
+                try await writer.changeSize(
+                    cols: cols,
+                    rows: rows,
+                    pixelWidth: 0,
+                    pixelHeight: 0
+                )
+            }
         )
     }
 }

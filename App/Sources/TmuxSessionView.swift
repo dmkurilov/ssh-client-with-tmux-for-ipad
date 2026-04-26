@@ -18,6 +18,8 @@ struct TmuxSessionView: View {
     @State private var session = TmuxSession()
     @State private var statusMessage: String = "Connecting…"
     @State private var errorMessage: String?
+    @State private var pendingResize: Task<Void, Never>?
+    @State private var lastAppliedSize: (cols: Int, rows: Int)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,6 +121,9 @@ struct TmuxSessionView: View {
                             driver: driver,
                             onInput: { data in
                                 sendInput(data, toPaneID: paneID)
+                            },
+                            onSizeChange: { cols, rows in
+                                scheduleResize(cols: cols, rows: rows)
                             }
                         )
                         .opacity(isActive ? 1 : 0)
@@ -187,6 +192,36 @@ struct TmuxSessionView: View {
         let cmd = "send-keys -H -t %\(paneID) \(hexBytes)\n"
         Task {
             try? await shell.write(Data(cmd.utf8))
+        }
+    }
+
+    /// Debounced resize. Multiple SwiftTermView geometry updates
+    /// during a single rotation/reflow collapse to one PTY resize.
+    /// Skips when nothing has actually changed.
+    private func scheduleResize(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        if let last = lastAppliedSize, last.cols == cols, last.rows == rows {
+            return
+        }
+        pendingResize?.cancel()
+        pendingResize = Task {
+            try? await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
+            guard !Task.isCancelled else { return }
+            await applyResize(cols: cols, rows: rows)
+        }
+    }
+
+    private func applyResize(cols: Int, rows: Int) async {
+        guard let shell else { return }
+        do {
+            try await shell.resize(cols: cols, rows: rows)
+            await MainActor.run {
+                lastAppliedSize = (cols, rows)
+            }
+        } catch {
+            await MainActor.run {
+                errorMessage = "resize failed: \(error)"
+            }
         }
     }
 
