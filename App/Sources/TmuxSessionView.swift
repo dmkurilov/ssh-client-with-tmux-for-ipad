@@ -1,12 +1,13 @@
 import SwiftUI
 import SSHCore
 import TmuxCC
+import TerminalKit
 
-/// Live tmux `-CC` session screen. Opens its own SSH shell channel,
-/// runs `tmux -CC new-session -A -s ipad-tmux` on it, feeds output
-/// through `TmuxCCParser`, and renders a tab strip from the resulting
-/// `[TmuxEvent]`s. No SwiftTerm in this path — pane content rendering
-/// arrives in step B'.
+/// Live tmux `-CC` session screen with a tab strip and per-pane
+/// SwiftTerm rendering. Tap a tab to switch windows on the server.
+/// Pane content is **read-only** in this step — typing into the
+/// terminal does nothing yet (B'' wires `send-keys -l -t %<id>` to
+/// route input back to the active pane).
 struct TmuxSessionView: View {
     let config: SmokeTestConfig
     let keyData: Data
@@ -66,6 +67,12 @@ struct TmuxSessionView: View {
                         tabButton(window)
                     }
                 }
+                Button(action: newWindow) {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!session.isAttached)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -75,56 +82,97 @@ struct TmuxSessionView: View {
     private func tabButton(_ window: TmuxWindow) -> some View {
         let isActive = window.id == session.activeWindowID
         let label = window.name.map { "@\(window.id) · \($0)" } ?? "@\(window.id)"
-        return Text(label)
-            .font(.caption.monospaced())
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+        return Button {
+            selectWindow(window.id)
+        } label: {
+            Text(label)
+                .font(.caption.monospaced())
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private var content: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            if let id = session.activeWindowID {
-                Text("Window @\(id)")
-                    .font(.title2.weight(.semibold))
-                if let activePane = activePaneID(for: id) {
-                    Text("active pane %\(activePane)")
-                        .font(.callout.monospaced())
+        ZStack {
+            if session.paneIDs.isEmpty {
+                VStack(spacing: 8) {
+                    Text(session.activeWindowID.map { "Window @\($0)" } ?? "no active window")
+                        .font(.title2.weight(.semibold))
+                    Text("Waiting for pane output…")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-                Text("Pane content rendering — TODO (step B').")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
             } else {
-                Text("No active window")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
+                // Every known pane gets its own SwiftTermView; only the
+                // active one is visible. Stable IDs preserve view
+                // identity, so switching tabs doesn't blow away buffers.
+                ForEach(session.paneIDs, id: \.self) { paneID in
+                    if let driver = session.driver(for: paneID) {
+                        SwiftTermView(
+                            driver: driver,
+                            onInput: { _ in
+                                // TODO B'': route input via
+                                // `send-keys -l -t %<id> "<bytes>"`.
+                            }
+                        )
+                        .opacity(paneID == currentPaneID ? 1 : 0)
+                        .disabled(true)
+                    }
+                }
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottomLeading) {
             if let line = session.lastResponseLine {
-                Text("last response: \(line)")
+                Text(line)
                     .font(.caption.monospaced())
                     .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
+                    .padding(8)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                    .padding(8)
             }
+        }
+        .overlay(alignment: .bottom) {
             if let errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
+                    .padding(8)
             }
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func activePaneID(for windowID: Int) -> Int? {
-        session.windows.first(where: { $0.id == windowID })?.activePaneID
+    private var currentPaneID: Int? {
+        // Prefer the active window's known active pane.
+        if let wid = session.activeWindowID,
+           let pane = session.windows.first(where: { $0.id == wid })?.activePaneID
+        {
+            return pane
+        }
+        // Fallback: show any pane that's emitted output. Covers the
+        // race where `output(paneID, …)` arrives before `windowAdd`,
+        // and the common case of a single-pane session where layout
+        // parsing isn't yet available to map panes → windows.
+        return session.paneIDs.first
+    }
+
+    private func selectWindow(_ id: Int) {
+        guard let shell else { return }
+        Task {
+            try? await shell.write(Data("select-window -t :@\(id)\n".utf8))
+        }
+    }
+
+    private func newWindow() {
+        guard let shell else { return }
+        Task {
+            try? await shell.write(Data("new-window\n".utf8))
+        }
     }
 
     private func connect() async {
@@ -141,14 +189,10 @@ struct TmuxSessionView: View {
                 self.statusMessage = "starting tmux -CC"
             }
 
-            // Kick off tmux -CC. `-A` makes new-session attach to an
-            // existing session with the same name instead of failing
-            // with "duplicate session".
             try await shellSession.write(
                 Data("tmux -CC new-session -A -s ipad-tmux\n".utf8)
             )
 
-            // Pump output → parser → state.
             Task {
                 var parser = TmuxCCParser()
                 do {

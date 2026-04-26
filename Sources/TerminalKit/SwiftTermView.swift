@@ -31,7 +31,14 @@ public struct SwiftTermView: UIViewRepresentable {
     public func makeUIView(context: Context) -> SwiftTerm.TerminalView {
         let view = SwiftTerm.TerminalView()
         view.terminalDelegate = context.coordinator
-        driver.bind(view)
+        // Defer bind to the next runloop tick: by then SwiftUI has
+        // applied a layout pass and SwiftTerm's `layoutSubviews` has
+        // computed real cell dimensions. Replaying buffered bytes
+        // against the live size avoids the cols≈0 wrap-each-char bug.
+        let driver = self.driver
+        DispatchQueue.main.async {
+            driver.bind(view)
+        }
         return view
     }
 
