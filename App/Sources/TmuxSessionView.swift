@@ -5,9 +5,10 @@ import TerminalKit
 
 /// Live tmux `-CC` session screen with a tab strip and per-pane
 /// SwiftTerm rendering. Tap a tab to switch windows on the server.
-/// Pane content is **read-only** in this step — typing into the
-/// terminal does nothing yet (B'' wires `send-keys -l -t %<id>` to
-/// route input back to the active pane).
+/// Typing in the active pane sends each input chunk back to the
+/// pane via `send-keys -H -t %<paneID> <hex bytes>` — `-H` lets us
+/// pass arbitrary bytes (control chars, escape sequences, UTF-8)
+/// without shell-quoting headaches.
 struct TmuxSessionView: View {
     let config: SmokeTestConfig
     let keyData: Data
@@ -108,19 +109,20 @@ struct TmuxSessionView: View {
                 }
             } else {
                 // Every known pane gets its own SwiftTermView; only the
-                // active one is visible. Stable IDs preserve view
-                // identity, so switching tabs doesn't blow away buffers.
+                // active one is visible AND interactive. Stable IDs
+                // preserve view identity, so switching tabs doesn't
+                // blow away buffers.
                 ForEach(session.paneIDs, id: \.self) { paneID in
                     if let driver = session.driver(for: paneID) {
+                        let isActive = paneID == currentPaneID
                         SwiftTermView(
                             driver: driver,
-                            onInput: { _ in
-                                // TODO B'': route input via
-                                // `send-keys -l -t %<id> "<bytes>"`.
+                            onInput: { data in
+                                sendInput(data, toPaneID: paneID)
                             }
                         )
-                        .opacity(paneID == currentPaneID ? 1 : 0)
-                        .disabled(true)
+                        .opacity(isActive ? 1 : 0)
+                        .disabled(!isActive)
                     }
                 }
             }
@@ -172,6 +174,19 @@ struct TmuxSessionView: View {
         guard let shell else { return }
         Task {
             try? await shell.write(Data("new-window\n".utf8))
+        }
+    }
+
+    /// Route one chunk of keyboard input from SwiftTerm to a tmux
+    /// pane via `send-keys -H` (hex byte arguments). One command per
+    /// chunk — for typed keys that's per-keystroke, for paste it's
+    /// one command for the whole burst.
+    private func sendInput(_ data: Data, toPaneID paneID: Int) {
+        guard let shell, !data.isEmpty else { return }
+        let hexBytes = data.map { String(format: "%02x", $0) }.joined(separator: " ")
+        let cmd = "send-keys -H -t %\(paneID) \(hexBytes)\n"
+        Task {
+            try? await shell.write(Data(cmd.utf8))
         }
     }
 
