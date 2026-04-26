@@ -109,6 +109,15 @@ public struct TmuxCCParser {
 
     private mutating func flushLine(events: inout [TmuxEvent]) {
         guard !lineBuffer.isEmpty else { return }
+        // Strip a trailing CR so CRLF-terminated streams (the default
+        // when tmux runs behind a PTY with ONLCR) parse the same as
+        // LF-only streams.
+        if lineBuffer.last == 0x0D {
+            lineBuffer.removeLast()
+        }
+        guard !lineBuffer.isEmpty else {
+            return
+        }
         let line = String(decoding: lineBuffer, as: UTF8.self)
         lineBuffer.removeAll(keepingCapacity: true)
         events.append(parseLine(line))

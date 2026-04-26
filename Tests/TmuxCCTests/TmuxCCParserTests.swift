@@ -243,4 +243,33 @@ final class TmuxCCParserTests: XCTestCase {
         XCTAssertEqual(parser.feed("%window-add @9"), [])
         XCTAssertEqual(parser.finish(), [.windowAdd(windowID: 9)])
     }
+
+    // MARK: - Line-ending robustness
+
+    func test_crlfLineEndings_simpleNotification() {
+        var parser = TmuxCCParser(expectDCSFraming: false)
+        XCTAssertEqual(
+            parser.feed("%window-add @4\r\n"),
+            [.windowAdd(windowID: 4)]
+        )
+    }
+
+    func test_crlfLineEndings_responseBracket() {
+        var parser = TmuxCCParser(expectDCSFraming: false)
+        XCTAssertEqual(
+            parser.feed("%begin 100 200 0\r\n%end 100 200 0\r\n"),
+            [
+                .begin(time: 100, number: 200, flags: 0),
+                .end(time: 100, number: 200, flags: 0)
+            ]
+        )
+    }
+
+    func test_crlfLineEndings_sessionChangedNameHasNoTrailingCR() {
+        var parser = TmuxCCParser(expectDCSFraming: false)
+        XCTAssertEqual(
+            parser.feed("%session-changed $2 ipad-test\r\n"),
+            [.sessionChanged(sessionID: 2, name: "ipad-test")]
+        )
+    }
 }

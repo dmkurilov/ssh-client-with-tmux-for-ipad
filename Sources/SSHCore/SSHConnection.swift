@@ -95,6 +95,11 @@ public actor SSHConnection {
     /// interactive programs including `tmux -CC` (tmux calls
     /// `tcgetattr(3)` on startup to read terminal dimensions even
     /// though it does its own rendering).
+    ///
+    /// The macOS 15 availability mirrors Citadel's `withTTY`/`withPTY`
+    /// gating; iOS 17 is our deployment target and unrestricted by
+    /// Citadel.
+    @available(macOS 15.0, iOS 17.0, *)
     public func openShell(
         allocatePTY: Bool = true,
         termType: String = "xterm-256color",
