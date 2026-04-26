@@ -74,6 +74,8 @@ targets:
         product: ColorSchemes
       - package: Domain
         product: SSHCore
+      - package: Domain
+        product: TerminalKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dmkurilov.ssh-client-with-tmux-for-ipad

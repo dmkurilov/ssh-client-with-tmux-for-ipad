@@ -46,9 +46,16 @@ struct ContentView: View {
                 .disabled(isRunning)
 
                 NavigationLink {
-                    ShellSmokeView(config: config, keyData: keyData)
+                    RemoteShellView(config: config, keyData: keyData)
                 } label: {
                     Text("Open shell on \(config.host)")
+                }
+                .buttonStyle(.bordered)
+
+                NavigationLink {
+                    TmuxSessionView(config: config, keyData: keyData)
+                } label: {
+                    Text("Open tmux on \(config.host)")
                 }
                 .buttonStyle(.bordered)
 

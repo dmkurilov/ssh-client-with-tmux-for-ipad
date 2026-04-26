@@ -12,12 +12,14 @@ let package = Package(
         .library(name: "TmuxCC", targets: ["TmuxCC"]),
         .library(name: "ColorSchemes", targets: ["ColorSchemes"]),
         .library(name: "SSHCore", targets: ["SSHCore"]),
+        .library(name: "TerminalKit", targets: ["TerminalKit"]),
     ],
     dependencies: [
-        // De-risking step: only `SSHCore` uses this for now. If SPM cannot
-        // resolve the version, check https://github.com/orlandos-nl/Citadel
-        // /releases and adjust the `from:` lower bound.
+        // SSHCore deps. If SPM cannot resolve a version, check the
+        // upstream release tags and adjust the `from:` lower bound.
         .package(url: "https://github.com/orlandos-nl/Citadel", from: "0.10.0"),
+        // TerminalKit dep — SwiftTerm renders ANSI bytes into a UIView.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.3.0"),
     ],
     targets: [
         .target(
@@ -59,6 +61,13 @@ let package = Package(
                 .product(name: "Citadel", package: "Citadel"),
             ],
             path: "Sources/SSHCore"
+        ),
+        .target(
+            name: "TerminalKit",
+            dependencies: [
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ],
+            path: "Sources/TerminalKit"
         ),
     ]
 )

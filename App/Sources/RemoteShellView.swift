@@ -1,30 +1,30 @@
 import SwiftUI
 import SSHCore
 import TmuxCC
+import TerminalKit
 
-/// Crude interactive shell for proving SSHShellSession works end-to-end.
-/// Raw bytes drop into a scrolling text view. The same bytes are also
-/// fed through a `TmuxCCParser`; any emitted `TmuxEvent`s are listed
-/// in a second panel below — empty until the user types
-/// `tmux -CC new-session …` and the DCS envelope kicks in.
-/// TerminalKit (SwiftTerm) replaces the raw-text rendering in a later step.
-struct ShellSmokeView: View {
+/// Live SSH shell screen: SwiftTerm renders the bytes; the events
+/// panel below shows what `TmuxCCParser` sees on the same stream.
+/// The events panel will move behind a debug toggle once we have a
+/// proper tab UI; for now it earns its keep as the canary for tmux
+/// state work.
+struct RemoteShellView: View {
     let config: SmokeTestConfig
     let keyData: Data
 
     @State private var connection: SSHConnection?
     @State private var session: SSHShellSession?
-    @State private var output: String = ""
     @State private var events: [String] = []
-    @State private var input: String = ""
     @State private var statusMessage: String = "Connecting…"
     @State private var errorMessage: String?
+
+    @State private var driver = TerminalDriver()
 
     var body: some View {
         VStack(spacing: 0) {
             header
 
-            rawOutputPanel
+            terminalPanel
                 .frame(maxHeight: .infinity)
 
             Divider()
@@ -39,8 +39,6 @@ struct ShellSmokeView: View {
                     .multilineTextAlignment(.leading)
                     .padding(8)
             }
-
-            inputRow
         }
         .navigationTitle(config.host)
         .navigationBarTitleDisplayMode(.inline)
@@ -64,25 +62,20 @@ struct ShellSmokeView: View {
         .padding(.vertical, 4)
     }
 
-    private var rawOutputPanel: some View {
+    private var terminalPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            panelLabel("raw output")
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(output.isEmpty ? "(no output yet)" : output)
-                        .font(.body.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                        .id("output-end")
+            panelLabel("terminal")
+            SwiftTermView(
+                driver: driver,
+                onInput: { data in
+                    handleInput(data)
+                },
+                onSizeChange: { cols, rows in
+                    // TODO: wire to SSHShellSession.resize once Citadel's
+                    // changeSize is reachable from withPTY's closure scope.
+                    _ = (cols, rows)
                 }
-                .onChange(of: output) {
-                    withAnimation(.linear(duration: 0.05)) {
-                        proxy.scrollTo("output-end", anchor: .bottom)
-                    }
-                }
-            }
-            .background(Color(.secondarySystemBackground))
+            )
         }
     }
 
@@ -128,20 +121,6 @@ struct ShellSmokeView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var inputRow: some View {
-        HStack(spacing: 8) {
-            TextField("type a command, press return", text: $input)
-                .textFieldStyle(.roundedBorder)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .onSubmit { sendLine() }
-                .disabled(session == nil)
-            Button("Send") { sendLine() }
-                .disabled(session == nil || input.isEmpty)
-        }
-        .padding(10)
-    }
-
     private func openShell() async {
         let endpoint = SSHEndpoint(host: config.host, port: config.port, user: config.user)
         do {
@@ -155,16 +134,15 @@ struct ShellSmokeView: View {
                 self.session = shell
                 self.statusMessage = "connected"
             }
-            // Drain output → append to the text view AND feed through
-            // TmuxCCParser, whose emitted events go to the events panel.
+            // Pump output: drive SwiftTerm AND the tmux parser from the
+            // same byte stream.
             Task {
                 var parser = TmuxCCParser()
                 do {
                     for try await data in shell.output {
-                        let chunk = String(decoding: data, as: UTF8.self)
                         let newEventLines = parser.feed(data).map { String(describing: $0) }
                         await MainActor.run {
-                            output += chunk
+                            driver.feed(data)
                             if !newEventLines.isEmpty {
                                 events.append(contentsOf: newEventLines)
                             }
@@ -186,13 +164,11 @@ struct ShellSmokeView: View {
         }
     }
 
-    private func sendLine() {
+    private func handleInput(_ data: Data) {
         guard let session else { return }
-        let line = input + "\n"
-        input = ""
         Task {
             do {
-                try await session.write(Data(line.utf8))
+                try await session.write(data)
             } catch {
                 await MainActor.run {
                     errorMessage = "write failed: \(error)"

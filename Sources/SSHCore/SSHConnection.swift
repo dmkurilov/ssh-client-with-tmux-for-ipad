@@ -154,18 +154,25 @@ public actor SSHConnection {
                 }
             } catch {
                 outputContinuation.finish(throwing: error)
+                await writerBox.fail(error)
             }
+        }
+
+        // Block until the channel has finished setting itself up
+        // (writer in hand) — otherwise an immediate `write(...)` from
+        // the caller would race the channel's bring-up.
+        do {
+            _ = try await writerBox.awaitReady()
+        } catch {
+            ttyTask.cancel()
+            throw SSHError.channelFailed(underlying: "\(error)")
         }
 
         return SSHShellSession(
             output: output,
             continuation: outputContinuation,
             writer: { data in
-                guard let writer = await writerBox.get() else {
-                    throw SSHError.channelFailed(
-                        underlying: "shell stdin writer not yet available"
-                    )
-                }
+                let writer = try await writerBox.awaitReady()
                 try await writer.write(ByteBuffer(bytes: Array(data)))
             },
             closer: {
@@ -176,10 +183,45 @@ public actor SSHConnection {
     }
 }
 
-/// Thread-safe holder for the stdin writer, which Citadel hands us
-/// asynchronously inside the `withTTY` closure.
+/// Holder for the stdin writer that Citadel hands us asynchronously
+/// inside the `withTTY`/`withPTY` closure. Callers `awaitReady()`
+/// before writing so they don't race the channel's bring-up.
 private actor TTYWriterBox {
-    private var writer: TTYStdinWriter?
-    func set(_ w: TTYStdinWriter) { self.writer = w }
-    func get() -> TTYStdinWriter? { writer }
+    private enum State {
+        case waiting
+        case ready(TTYStdinWriter)
+        case failed(Error)
+    }
+
+    private var state: State = .waiting
+    private var pending: [CheckedContinuation<TTYStdinWriter, Error>] = []
+
+    func set(_ writer: TTYStdinWriter) {
+        guard case .waiting = state else { return }
+        state = .ready(writer)
+        let conts = pending
+        pending = []
+        for cont in conts { cont.resume(returning: writer) }
+    }
+
+    func fail(_ error: Error) {
+        guard case .waiting = state else { return }
+        state = .failed(error)
+        let conts = pending
+        pending = []
+        for cont in conts { cont.resume(throwing: error) }
+    }
+
+    func awaitReady() async throws -> TTYStdinWriter {
+        switch state {
+        case .ready(let w):
+            return w
+        case .failed(let e):
+            throw e
+        case .waiting:
+            return try await withCheckedThrowingContinuation { cont in
+                pending.append(cont)
+            }
+        }
+    }
 }
