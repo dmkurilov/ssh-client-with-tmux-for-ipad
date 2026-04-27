@@ -10,7 +10,7 @@ import TerminalKit
 /// pass arbitrary bytes (control chars, escape sequences, UTF-8)
 /// without shell-quoting headaches.
 struct TmuxSessionView: View {
-    let config: SmokeTestConfig
+    let host: Host
     let keyData: Data
     let tofu: TOFUCoordinator
 
@@ -38,16 +38,6 @@ struct TmuxSessionView: View {
             Task {
                 await shell?.close()
                 await connection?.disconnect()
-            }
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { tofu.pendingPrompt != nil },
-                set: { _ in }
-            )
-        ) {
-            if let prompt = tofu.pendingPrompt {
-                TOFUPromptSheet(prompt: prompt) { tofu.resolve($0) }
             }
         }
     }
@@ -237,7 +227,7 @@ struct TmuxSessionView: View {
     }
 
     private func connect() async {
-        let endpoint = SSHEndpoint(host: config.host, port: config.port, user: config.user)
+        let endpoint = SSHEndpoint(host: host.host, port: host.port, user: host.user)
         let verifier = KnownHostsVerifier(
             knownHostsURL: KnownHostsLocation.url,
             prompter: { [tofu] prompt in

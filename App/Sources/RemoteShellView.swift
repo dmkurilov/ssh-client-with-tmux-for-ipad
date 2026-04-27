@@ -9,7 +9,7 @@ import TerminalKit
 /// proper tab UI; for now it earns its keep as the canary for tmux
 /// state work.
 struct RemoteShellView: View {
-    let config: SmokeTestConfig
+    let host: Host
     let keyData: Data
     let tofu: TOFUCoordinator
 
@@ -41,23 +41,13 @@ struct RemoteShellView: View {
                     .padding(8)
             }
         }
-        .navigationTitle(config.host)
+        .navigationTitle(host.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await openShell() }
         .onDisappear {
             Task {
                 await session?.close()
                 await connection?.disconnect()
-            }
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { tofu.pendingPrompt != nil },
-                set: { _ in }
-            )
-        ) {
-            if let prompt = tofu.pendingPrompt {
-                TOFUPromptSheet(prompt: prompt) { tofu.resolve($0) }
             }
         }
     }
@@ -133,7 +123,7 @@ struct RemoteShellView: View {
     }
 
     private func openShell() async {
-        let endpoint = SSHEndpoint(host: config.host, port: config.port, user: config.user)
+        let endpoint = SSHEndpoint(host: host.host, port: host.port, user: host.user)
         let verifier = KnownHostsVerifier(
             knownHostsURL: KnownHostsLocation.url,
             prompter: { [tofu] prompt in
