@@ -11,6 +11,7 @@ import TerminalKit
 struct RemoteShellView: View {
     let config: SmokeTestConfig
     let keyData: Data
+    let tofu: TOFUCoordinator
 
     @State private var connection: SSHConnection?
     @State private var session: SSHShellSession?
@@ -47,6 +48,16 @@ struct RemoteShellView: View {
             Task {
                 await session?.close()
                 await connection?.disconnect()
+            }
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { tofu.pendingPrompt != nil },
+                set: { _ in }
+            )
+        ) {
+            if let prompt = tofu.pendingPrompt {
+                TOFUPromptSheet(prompt: prompt) { tofu.resolve($0) }
             }
         }
     }
@@ -123,10 +134,17 @@ struct RemoteShellView: View {
 
     private func openShell() async {
         let endpoint = SSHEndpoint(host: config.host, port: config.port, user: config.user)
+        let verifier = KnownHostsVerifier(
+            knownHostsURL: KnownHostsLocation.url,
+            prompter: { [tofu] prompt in
+                await tofu.awaitDecision(for: prompt)
+            }
+        )
         do {
             let conn = try await SSHConnection.connect(
                 endpoint: endpoint,
-                credentials: .privateKey(keyData)
+                credentials: .privateKey(keyData),
+                hostKeyVerifier: verifier
             )
             let shell = try await conn.openShell()
             await MainActor.run {

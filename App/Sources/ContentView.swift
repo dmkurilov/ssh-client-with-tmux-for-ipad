@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var output: String = ""
     @State private var errorMessage: String?
     @State private var isRunning: Bool = false
+    @State private var tofu = TOFUCoordinator()
 
     var body: some View {
         NavigationStack {
@@ -28,6 +29,18 @@ struct ContentView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { tofu.pendingPrompt != nil },
+                set: { _ in /* dismiss only via button → resolve */ }
+            )
+        ) {
+            if let prompt = tofu.pendingPrompt {
+                TOFUPromptSheet(prompt: prompt) { decision in
+                    tofu.resolve(decision)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -46,14 +59,14 @@ struct ContentView: View {
                 .disabled(isRunning)
 
                 NavigationLink {
-                    RemoteShellView(config: config, keyData: keyData)
+                    RemoteShellView(config: config, keyData: keyData, tofu: tofu)
                 } label: {
                     Text("Open shell on \(config.host)")
                 }
                 .buttonStyle(.bordered)
 
                 NavigationLink {
-                    TmuxSessionView(config: config, keyData: keyData)
+                    TmuxSessionView(config: config, keyData: keyData, tofu: tofu)
                 } label: {
                     Text("Open tmux on \(config.host)")
                 }
@@ -103,11 +116,18 @@ struct ContentView: View {
 
         let endpoint = SSHEndpoint(host: config.host, port: config.port, user: config.user)
         let credentials = Credentials.privateKey(keyData)
+        let verifier = KnownHostsVerifier(
+            knownHostsURL: KnownHostsLocation.url,
+            prompter: { [tofu] prompt in
+                await tofu.awaitDecision(for: prompt)
+            }
+        )
 
         do {
             let connection = try await SSHConnection.connect(
                 endpoint: endpoint,
-                credentials: credentials
+                credentials: credentials,
+                hostKeyVerifier: verifier
             )
             let result = try await connection.exec("uname -a")
             output = String(decoding: result.stdout, as: UTF8.self)

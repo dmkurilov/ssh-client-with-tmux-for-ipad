@@ -64,6 +64,7 @@ let package = Package(
             name: "SSHCore",
             dependencies: [
                 .product(name: "Citadel", package: "Citadel"),
+                "SSHKnownHosts",
             ],
             path: "Sources/SSHCore"
         ),

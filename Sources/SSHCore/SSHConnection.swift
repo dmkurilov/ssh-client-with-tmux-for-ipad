@@ -20,7 +20,7 @@ public actor SSHConnection {
     public static func connect(
         endpoint: SSHEndpoint,
         credentials: Credentials,
-        hostKeyVerifier: HostKeyVerifier = AcceptAllHostKeyVerifier()
+        hostKeyVerifier: HostKeyVerifier
     ) async throws -> SSHConnection {
         let connection = SSHConnection(endpoint: endpoint)
         try await connection.openClient(
@@ -54,17 +54,18 @@ public actor SSHConnection {
             }
         }
 
-        // TODO step C: replace `.acceptAnything()` with an adapter that
-        // calls into the supplied `hostKeyVerifier` and persists the
-        // decision to a `known_hosts` store.
-        _ = hostKeyVerifier
+        let adapter = HostKeyVerifierAdapter(
+            host: endpoint.host,
+            port: endpoint.port,
+            verifier: hostKeyVerifier
+        )
 
         do {
             self.client = try await SSHClient.connect(
                 host: endpoint.host,
                 port: endpoint.port,
                 authenticationMethod: auth,
-                hostKeyValidator: .acceptAnything(),
+                hostKeyValidator: .custom(adapter),
                 reconnect: .never
             )
         } catch {
