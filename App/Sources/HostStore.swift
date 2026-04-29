@@ -38,6 +38,15 @@ final class HostStore {
         persist()
     }
 
+    /// Save the last-attached tmux session name for a host. No-op if
+    /// the host is no longer in the store (deleted while connected).
+    func updateLastTmuxSession(hostID: UUID, name: String?) {
+        guard let idx = hosts.firstIndex(where: { $0.id == hostID }) else { return }
+        guard hosts[idx].lastTmuxSession != name else { return }
+        hosts[idx].lastTmuxSession = name
+        persist()
+    }
+
     func remove(at offsets: IndexSet) {
         hosts.remove(atOffsets: offsets)
         persist()

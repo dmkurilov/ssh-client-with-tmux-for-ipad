@@ -1,6 +1,7 @@
 import Foundation
 
-/// Decode the escape format used in `%output` messages.
+/// Decode the escape format used in `%output` messages and in
+/// command response lines (`capture-pane -e`, etc.).
 ///
 /// tmux escapes control bytes (< 0x20) and the backslash byte as `\NNN`
 /// (three octal digits). Everything else — including high bytes (0x80+)
@@ -9,9 +10,9 @@ import Foundation
 /// A lone `\` that isn't followed by three octal digits is passed through
 /// as-is. Real tmux streams never produce that, but being permissive on
 /// input costs nothing and makes the decoder safe to feed arbitrary data.
-enum OutputDecoder {
+public enum OutputDecoder {
 
-    static func decode(_ input: String) -> Data {
+    public static func decode(_ input: String) -> Data {
         let bytes = Array(input.utf8)
         var result = Data()
         result.reserveCapacity(bytes.count)

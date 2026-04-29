@@ -12,6 +12,7 @@ struct RemoteShellView: View {
     let host: Host
     let keyData: Data
     let tofu: TOFUCoordinator
+    let settings: SettingsStore
 
     @State private var connection: SSHConnection?
     @State private var session: SSHShellSession?
@@ -20,6 +21,8 @@ struct RemoteShellView: View {
     @State private var errorMessage: String?
 
     @State private var driver = TerminalDriver()
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,6 +47,11 @@ struct RemoteShellView: View {
         .navigationTitle(host.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await openShell() }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                Task { await reconnectIfNeeded() }
+            }
+        }
         .onDisappear {
             Task {
                 await session?.close()
@@ -57,6 +65,14 @@ struct RemoteShellView: View {
             Text(statusMessage)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+            if isDisconnected {
+                Button("Reconnect") {
+                    Task { await reconnectIfNeeded() }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
             Spacer()
         }
         .padding(.horizontal, 10)
@@ -68,6 +84,7 @@ struct RemoteShellView: View {
             panelLabel("terminal")
             SwiftTermView(
                 driver: driver,
+                scheme: settings.selectedScheme,
                 onInput: { data in
                     handleInput(data)
                 },
@@ -120,6 +137,25 @@ struct RemoteShellView: View {
             .padding(.top, 6)
             .padding(.bottom, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Re-open the shell after iOS suspended the app and the SSH
+    /// socket died. The remote shell is a fresh process — there's no
+    /// server-side state to recover, so the existing terminal buffer
+    /// just shows the old output above the new prompt.
+    private func reconnectIfNeeded() async {
+        guard isDisconnected else { return }
+        await session?.close()
+        await connection?.disconnect()
+        session = nil
+        connection = nil
+        errorMessage = nil
+        statusMessage = "reconnecting…"
+        await openShell()
+    }
+
+    private var isDisconnected: Bool {
+        statusMessage == "disconnected" || statusMessage == "session ended"
     }
 
     private func openShell() async {

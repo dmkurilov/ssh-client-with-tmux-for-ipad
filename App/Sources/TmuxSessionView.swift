@@ -13,6 +13,8 @@ struct TmuxSessionView: View {
     let host: Host
     let keyData: Data
     let tofu: TOFUCoordinator
+    let settings: SettingsStore
+    let store: HostStore
 
     @State private var connection: SSHConnection?
     @State private var shell: SSHShellSession?
@@ -21,6 +23,20 @@ struct TmuxSessionView: View {
     @State private var errorMessage: String?
     @State private var pendingResize: Task<Void, Never>?
     @State private var lastAppliedSize: (cols: Int, rows: Int)?
+    @State private var showingSessions = false
+    @State private var availableSessions: [TmuxSessionInfo] = []
+    @State private var showingAttachPicker = false
+    @State private var showingDebug = false
+    /// `@State` on a class-type session persists across `NavigationStack`
+    /// pop+push, so on a fresh appear the session may still hold the
+    /// previous attach's `sessionID`. Without this flag, the next
+    /// `%session-changed` event looks like a `switch-client`
+    /// (old != new, both non-nil) and triggers a spurious clear that
+    /// zeroes `activeWindowID` and pops the view.
+    @State private var hasObservedInitialSessionID = false
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,11 +46,107 @@ struct TmuxSessionView: View {
                 .background(Color(.secondarySystemBackground))
             Divider()
             content
+            if showingDebug {
+                Divider()
+                debugOverlay
+            }
         }
+        .background(keyboardShortcutSink)
         .navigationTitle(session.sessionName.map { "tmux: \($0)" } ?? "tmux")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingSessions = true
+                } label: {
+                    Image(systemName: "rectangle.stack")
+                }
+                .disabled(shell == nil)
+            }
+        }
+        .sheet(isPresented: $showingSessions) {
+            if let shell {
+                TmuxSessionsSheet(session: session, shell: shell) {
+                    showingSessions = false
+                }
+            }
+        }
+        .sheet(isPresented: $showingAttachPicker) {
+            TmuxAttachPickerSheet(
+                sessions: availableSessions,
+                onAttach: { name in
+                    showingAttachPicker = false
+                    Task { await attach(.existing(name)) }
+                },
+                onCreate: { name in
+                    showingAttachPicker = false
+                    Task { await attach(.new(name)) }
+                },
+                onCancel: {
+                    showingAttachPicker = false
+                    statusMessage = "cancelled"
+                }
+            )
+            .interactiveDismissDisabled()
+        }
         .task { await connect() }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            session.logDebug("scenePhase: \(oldPhase) → \(newPhase)")
+            if newPhase == .active {
+                Task { await reconnectIfNeeded() }
+            }
+        }
+        .onChange(of: session.isAttached) { _, attached in
+            session.logDebug("onChange isAttached → \(attached)")
+            if attached {
+                Task { await bootstrapWindows() }
+            }
+        }
+        .onChange(of: session.sessionID) { oldVal, newVal in
+            session.logDebug("onChange sessionID: \(String(describing: oldVal)) → \(String(describing: newVal))  initialSeen=\(hasObservedInitialSessionID)")
+            // Only a real `switch-client` should reset the view's
+            // window state — and that requires us to have seen at
+            // least one `%session-changed` *during this appear*.
+            // The first transition could just be the new attach
+            // landing on top of a stale `sessionID` left over from a
+            // previous attach (see hasObservedInitialSessionID).
+            guard let newVal else { return }
+            guard hasObservedInitialSessionID else {
+                hasObservedInitialSessionID = true
+                return
+            }
+            if let oldVal, oldVal != newVal {
+                session.logDebug("  → clearForSessionSwitch + rebootstrap")
+                session.clearForSessionSwitch()
+                Task { await bootstrapWindows() }
+            }
+        }
+        .onChange(of: session.activeWindowID) { oldVal, newVal in
+            session.logDebug("activeWindowID: \(String(describing: oldVal)) → \(String(describing: newVal))")
+            // No active window after we used to have one → session is
+            // empty (last window was killed). Pop back to the host
+            // detail screen so the user isn't stranded on a dead
+            // tmux view.
+            if oldVal != nil, newVal == nil {
+                session.logDebug("dismiss() — activeWindowID went nil")
+                dismiss()
+            }
+        }
+        .onAppear {
+            session.logDebug("TmuxSessionView.onAppear (host=\(host.name))")
+            hasObservedInitialSessionID = false
+        }
         .onDisappear {
+            session.logDebug("TmuxSessionView.onDisappear (host=\(host.name), sessionName=\(session.sessionName ?? "nil"))")
+            // Persist on the way out, not on every sessionName change.
+            // Saving mid-flow mutates `HostStore.hosts`, which causes
+            // `HostListView`'s ForEach to rebuild the NavigationLink
+            // destination closures and (in NavigationStack) pops the
+            // pushed view, kicking the user back to the host detail
+            // screen mid-attach.
+            if let name = session.sessionName {
+                store.updateLastTmuxSession(hostID: host.id, name: name)
+            }
             Task {
                 await shell?.close()
                 await connection?.disconnect()
@@ -42,12 +154,64 @@ struct TmuxSessionView: View {
         }
     }
 
+    /// Hidden buttons that exist solely to register hardware-keyboard
+    /// shortcuts via `.keyboardShortcut`. Cmd-modified keys go through
+    /// the iOS menu/responder chain *before* reaching SwiftTerm's text
+    /// input, so this is the cleanest way to add iTerm2-style splits
+    /// without fighting SwiftTerm for the keystroke.
+    ///
+    /// Mapping (matches iTerm2):
+    ///   - ⌘D       → split right (panes side by side, tmux `-h`)
+    ///   - ⌘⇧D      → split down  (panes stacked,    tmux `-v`)
+    private var keyboardShortcutSink: some View {
+        ZStack {
+            Button("Split right") {
+                sendShellCommand("split-window -h\n")
+            }
+            .keyboardShortcut("d", modifiers: .command)
+
+            Button("Split down") {
+                sendShellCommand("split-window -v\n")
+            }
+            .keyboardShortcut("d", modifiers: [.command, .shift])
+
+            Button("Close pane") {
+                closeActivePane()
+            }
+            .keyboardShortcut("w", modifiers: .command)
+
+            Button("Close window") {
+                if let wid = session.activeWindowID {
+                    closeWindow(wid)
+                }
+            }
+            .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+    }
+
     private var statusBar: some View {
         HStack {
             Text(statusMessage)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+            if isDisconnected {
+                Button("Reconnect") {
+                    Task { await reconnectIfNeeded() }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
             Spacer()
+            Button {
+                showingDebug.toggle()
+            } label: {
+                Image(systemName: showingDebug ? "ladybug.fill" : "ladybug")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
             if let id = session.sessionID, let name = session.sessionName {
                 Text("$\(id) \(name)")
                     .font(.caption.monospaced())
@@ -56,6 +220,30 @@ struct TmuxSessionView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    /// Bottom-aligned overlay listing recent events + outgoing
+    /// commands. Toggled via the ladybug in the status bar.
+    private var debugOverlay: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(Array(session.debugLog.enumerated()), id: \.offset) { idx, line in
+                        Text(line)
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(idx)
+                    }
+                }
+                .padding(8)
+            }
+            .onChange(of: session.debugLog.count) { _, n in
+                if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
+            }
+        }
+        .frame(height: 200)
+        .background(Color.black.opacity(0.85))
+        .foregroundStyle(.green)
     }
 
     private var tabStrip: some View {
@@ -86,17 +274,26 @@ struct TmuxSessionView: View {
     private func tabButton(_ window: TmuxWindow) -> some View {
         let isActive = window.id == session.activeWindowID
         let label = window.name.map { "@\(window.id) · \($0)" } ?? "@\(window.id)"
-        return Button {
-            selectWindow(window.id)
-        } label: {
+        return HStack(spacing: 6) {
             Text(label)
                 .font(.caption.monospaced())
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+                .onTapGesture { selectWindow(window.id) }
+            Button {
+                closeWindow(window.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(4)              // bigger tap target than the glyph
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder
@@ -110,26 +307,19 @@ struct TmuxSessionView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+            } else if let layout = currentWindow?.layout {
+                // Recursive layout rendering. Drivers for off-window
+                // panes live on in `session.drivers`; if the user
+                // tabs back, the new SwiftTermView replays the buffer
+                // from `TerminalDriver.bind`.
+                paneTree(layout)
             } else {
-                // Every known pane gets its own SwiftTermView; only the
-                // active one is visible AND interactive. Stable IDs
-                // preserve view identity, so switching tabs doesn't
-                // blow away buffers.
+                // Fallback: layoutChange hasn't arrived yet. Stack all
+                // known panes; active is the only one shown.
                 ForEach(session.paneIDs, id: \.self) { paneID in
-                    if let driver = session.driver(for: paneID) {
-                        let isActive = paneID == currentPaneID
-                        SwiftTermView(
-                            driver: driver,
-                            onInput: { data in
-                                sendInput(data, toPaneID: paneID)
-                            },
-                            onSizeChange: { cols, rows in
-                                scheduleResize(cols: cols, rows: rows)
-                            }
-                        )
-                        .opacity(isActive ? 1 : 0)
-                        .disabled(!isActive)
-                    }
+                    paneCell(paneID: paneID, isActive: paneID == currentPaneID)
+                        .opacity(paneID == currentPaneID ? 1 : 0)
+                        .disabled(paneID != currentPaneID)
                 }
             }
         }
@@ -169,17 +359,145 @@ struct TmuxSessionView: View {
         return session.paneIDs.first
     }
 
-    private func selectWindow(_ id: Int) {
-        guard let shell else { return }
-        Task {
-            try? await shell.write(Data("select-window -t :@\(id)\n".utf8))
+    private var currentWindow: TmuxWindow? {
+        guard let wid = session.activeWindowID else { return nil }
+        return session.windows.first { $0.id == wid }
+    }
+
+    /// Recursively render a parsed tmux layout. Branches use
+    /// `GeometryReader` + explicit frames sized by each child's share
+    /// of the layout (cols for horizontal, rows for vertical) so a
+    /// 60/40 split actually looks 60/40, not 50/50.
+    private func paneTree(_ layout: TmuxLayout) -> AnyView {
+        switch layout.node {
+        case .leaf(let paneID):
+            return AnyView(paneCell(paneID: paneID, isActive: paneID == currentPaneID))
+
+        case .horizontal(let kids):
+            let total = max(kids.reduce(0) { $0 + $1.cols }, 1)
+            return AnyView(
+                GeometryReader { geo in
+                    HStack(spacing: 1) {
+                        ForEach(Array(kids.enumerated()), id: \.offset) { _, child in
+                            paneTree(child)
+                                .frame(width: geo.size.width * CGFloat(child.cols) / CGFloat(total))
+                        }
+                    }
+                }
+            )
+
+        case .vertical(let kids):
+            let total = max(kids.reduce(0) { $0 + $1.rows }, 1)
+            return AnyView(
+                GeometryReader { geo in
+                    VStack(spacing: 1) {
+                        ForEach(Array(kids.enumerated()), id: \.offset) { _, child in
+                            paneTree(child)
+                                .frame(height: geo.size.height * CGFloat(child.rows) / CGFloat(total))
+                        }
+                    }
+                }
+            )
         }
     }
 
+    /// Single SwiftTermView for a pane. Inactive panes get a thin
+    /// border tint and a transparent tap target on top — taps fire
+    /// `select-pane` instead of being swallowed by SwiftTerm.
+    @ViewBuilder
+    private func paneCell(paneID: Int, isActive: Bool) -> some View {
+        if let driver = session.driver(for: paneID) {
+            ZStack {
+                SwiftTermView(
+                    driver: driver,
+                    scheme: settings.selectedScheme,
+                    onInput: { data in sendInput(data, toPaneID: paneID) },
+                    onSizeChange: { cols, rows in
+                        // Only the active pane drives window resize;
+                        // size events from background panes are noise
+                        // (and would shrink the window unnecessarily).
+                        if isActive {
+                            scheduleResize(paneCols: cols, paneRows: rows, paneID: paneID)
+                        }
+                    }
+                )
+                .disabled(!isActive)
+                if !isActive {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectPane(paneID) }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(
+                        isActive ? Color.accentColor.opacity(0.6) : Color.gray.opacity(0.25),
+                        lineWidth: isActive ? 2 : 1
+                    )
+            )
+        }
+    }
+
+    private func selectPane(_ id: Int) {
+        sendShellCommand("select-pane -t %\(id)\n")
+    }
+
+    /// Close a window: tell tmux, then optimistically prune our local
+    /// state. If `%window-close` arrives later for the same id it's a
+    /// no-op; if it never arrives (window was already gone), we
+    /// don't end up showing a ghost tab.
+    private func closeWindow(_ id: Int) {
+        sendShellCommand("kill-window -t :@\(id)\n")
+        session.removeWindow(id: id)
+    }
+
+    /// Close the active pane in our active window. We pass an
+    /// explicit `-t :@<wid>` so kill-pane targets the window the user
+    /// sees in the app, even if our local active state has drifted
+    /// from tmux's current window (which it does after pre-emptive
+    /// window removal — we don't follow up with `select-window`).
+    /// Last-pane case pre-emptively drops the window because
+    /// `%window-close` doesn't reliably arrive in `-CC` mode here;
+    /// multi-pane case is left alone since `%layout-change` does.
+    private func closeActivePane() {
+        guard let wid = session.activeWindowID else { return }
+        sendShellCommand("kill-pane -t :@\(wid)\n")
+        let win = session.windows.first(where: { $0.id == wid })
+        // A newly-opened window may not yet have its `%layout-change`
+        // — treat absent layout as single-pane, since tmux always
+        // creates windows with one pane.
+        let singlePane: Bool
+        if let layout = win?.layout {
+            if case .leaf = layout.node { singlePane = true } else { singlePane = false }
+        } else {
+            singlePane = true
+        }
+        if singlePane {
+            session.removeWindow(id: wid)
+        }
+    }
+
+    private func selectWindow(_ id: Int) {
+        sendShellCommand("select-window -t :@\(id)\n")
+    }
+
     private func newWindow() {
-        guard let shell else { return }
+        sendShellCommand("new-window\n")
+    }
+
+    /// Write one line of tmux-control-mode command directly to the
+    /// master shell (i.e. the tmux client itself, not a pane). This is
+    /// how every tmux verb in `-CC` mode is invoked — `select-window`,
+    /// `split-window`, `kill-pane`, etc.
+    private func sendShellCommand(_ cmd: String) {
+        session.logDebug("send: \(cmd.trimmingCharacters(in: .newlines))")
+        guard let shell else {
+            session.logDebug("  (no shell — dropped)")
+            return
+        }
         Task {
-            try? await shell.write(Data("new-window\n".utf8))
+            try? await shell.write(Data(cmd.utf8))
         }
     }
 
@@ -199,8 +517,14 @@ struct TmuxSessionView: View {
     /// Debounced resize. Multiple SwiftTermView geometry updates
     /// during a single rotation/reflow collapse to one PTY resize.
     /// Skips when nothing has actually changed.
-    private func scheduleResize(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0 else { return }
+    ///
+    /// `paneCols`/`paneRows` are the active pane's rendered size. With
+    /// splits, the *window* spans more cells than that — we scale up
+    /// using the active pane's share of the parsed layout so tmux
+    /// gets the bounding-box size, not just the active pane's.
+    private func scheduleResize(paneCols: Int, paneRows: Int, paneID: Int) {
+        guard paneCols > 0, paneRows > 0 else { return }
+        let (cols, rows) = scaleToWindow(paneCols: paneCols, paneRows: paneRows, paneID: paneID)
         if let last = lastAppliedSize, last.cols == cols, last.rows == rows {
             return
         }
@@ -209,6 +533,33 @@ struct TmuxSessionView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
             guard !Task.isCancelled else { return }
             await applyResize(cols: cols, rows: rows)
+        }
+    }
+
+    private func scaleToWindow(paneCols: Int, paneRows: Int, paneID: Int) -> (Int, Int) {
+        guard let layout = currentWindow?.layout,
+              let pane = findPane(paneID, in: layout),
+              pane.cols > 0, pane.rows > 0
+        else {
+            return (paneCols, paneRows)
+        }
+        let cScale = Double(layout.cols) / Double(pane.cols)
+        let rScale = Double(layout.rows) / Double(pane.rows)
+        return (
+            Int((Double(paneCols) * cScale).rounded()),
+            Int((Double(paneRows) * rScale).rounded())
+        )
+    }
+
+    private func findPane(_ id: Int, in layout: TmuxLayout) -> TmuxLayout? {
+        switch layout.node {
+        case .leaf(let p):
+            return p == id ? layout : nil
+        case .horizontal(let kids), .vertical(let kids):
+            for k in kids {
+                if let hit = findPane(id, in: k) { return hit }
+            }
+            return nil
         }
     }
 
@@ -226,6 +577,47 @@ struct TmuxSessionView: View {
         }
     }
 
+    /// Re-attach after the SSH socket died (typically because iOS
+    /// suspended the app). The server-side tmux session keeps running,
+    /// so reconnecting + `tmux -CC new-session -A` re-attaches to it
+    /// and the protocol replay rebuilds our window/pane state from
+    /// scratch.
+    private func reconnectIfNeeded() async {
+        session.logDebug("reconnectIfNeeded (status=\(statusMessage), isDisconnected=\(isDisconnected))")
+        guard isDisconnected else { return }
+        session.logDebug("  → reconnecting")
+        await shell?.close()
+        await connection?.disconnect()
+        shell = nil
+        connection = nil
+        session.reset()
+        lastAppliedSize = nil
+        errorMessage = nil
+        statusMessage = "reconnecting…"
+        await connect()
+    }
+
+    private var isDisconnected: Bool {
+        statusMessage == "disconnected"
+            || statusMessage == "stream ended"
+            || statusMessage == "cancelled"
+    }
+
+    private enum AttachChoice: CustomStringConvertible {
+        case existing(String)
+        case new(String?)   // nil → tmux picks a name
+
+        var description: String {
+            switch self {
+            case .existing(let name): return ".existing(\(name))"
+            case .new(let name): return ".new(\(name ?? "<auto>"))"
+            }
+        }
+    }
+
+    /// Phase 1: SSH-connect, probe `tmux ls`. If the host has a
+    /// remembered session that still exists, attach to it directly.
+    /// Otherwise present the picker so the user can choose or create.
     private func connect() async {
         let endpoint = SSHEndpoint(host: host.host, port: host.port, user: host.user)
         let verifier = KnownHostsVerifier(
@@ -240,16 +632,82 @@ struct TmuxSessionView: View {
                 credentials: .privateKey(keyData),
                 hostKeyVerifier: verifier
             )
-            let shellSession = try await conn.openShell()
             await MainActor.run {
                 self.connection = conn
+                self.statusMessage = "probing tmux sessions"
+            }
+
+            let sessions = try await probeSessions(conn: conn)
+            await MainActor.run { self.availableSessions = sessions }
+
+            if let remembered = host.lastTmuxSession,
+               sessions.contains(where: { $0.name == remembered })
+            {
+                await attach(.existing(remembered))
+            } else {
+                await MainActor.run {
+                    self.statusMessage = "choose tmux session"
+                    self.showingAttachPicker = true
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.errorMessage = "connect failed: \(error)"
+                self.statusMessage = "disconnected"
+            }
+        }
+    }
+
+    /// Run `tmux ls -F '...'` over an SSH `exec` channel and parse
+    /// the rows. We invoke through `$SHELL -lc` so the user's login
+    /// PATH (where tmux usually lives — `/usr/local/bin`, Homebrew,
+    /// etc.) is set; SSH `exec` otherwise gets a stripped PATH and
+    /// `tmux` may not resolve.
+    ///
+    /// An empty list (no tmux server, or no sessions) is not an
+    /// error — the picker just offers "+ New" only.
+    private func probeSessions(conn: SSHConnection) async throws -> [TmuxSessionInfo] {
+        // Real TAB (0x09) in the format string — tmux does NOT
+        // interpret `\t` as TAB in `-F`, so we have to embed the
+        // separator literally. Outer single-quoted via `$SHELL -lc`
+        // ensures tmux is on PATH from the user's login profile.
+        let format = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}"
+        let inner = "tmux ls -F \"\(format)\" 2>/dev/null"
+        let cmd = "$SHELL -lc '\(inner)'"
+        let result = try await conn.exec(cmd)
+        let stdout = String(decoding: result.stdout, as: UTF8.self)
+        return stdout
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .compactMap { TmuxSessionInfo.parse(String($0)) }
+    }
+
+    /// Phase 2: open the master shell, ship the chosen `tmux -CC`
+    /// command, and start pumping the stream into the parser.
+    private func attach(_ choice: AttachChoice) async {
+        guard let conn = connection else {
+            session.logDebug("attach: no connection — bail")
+            return
+        }
+        session.logDebug("attach: choice=\(choice)")
+        do {
+            let shellSession = try await conn.openShell()
+            let cmd: String
+            switch choice {
+            case .existing(let name):
+                cmd = "tmux -CC attach-session -t \(shellEscape(name))\n"
+            case .new(let maybeName):
+                if let name = maybeName, !name.isEmpty {
+                    cmd = "tmux -CC new-session -A -s \(shellEscape(name))\n"
+                } else {
+                    cmd = "tmux -CC\n"
+                }
+            }
+            await MainActor.run {
                 self.shell = shellSession
                 self.statusMessage = "starting tmux -CC"
             }
 
-            try await shellSession.write(
-                Data("tmux -CC new-session -A -s ipad-tmux\n".utf8)
-            )
+            try await shellSession.write(Data(cmd.utf8))
 
             Task {
                 var parser = TmuxCCParser()
@@ -275,9 +733,104 @@ struct TmuxSessionView: View {
             }
         } catch {
             await MainActor.run {
-                self.errorMessage = "connect failed: \(error)"
+                self.errorMessage = "attach failed: \(error)"
                 self.statusMessage = "disconnected"
             }
         }
+    }
+
+    /// Enumerate the active session's windows via `list-windows -F`
+    /// and feed the snapshots into `TmuxSession.bootstrap`. tmux
+    /// `-CC` doesn't replay `%window-add` for pre-existing windows,
+    /// so without this we'd attach to a session and see "no windows".
+    ///
+    /// `\t` here is a literal TAB byte — tmux's `-F` parser does not
+    /// interpret backslash escapes, but it preserves TABs from the
+    /// surrounding double-quoted argument.
+    private func bootstrapWindows() async {
+        guard let shell else { return }
+        let format = "#{window_id}\t#{window_active}\t#{window_name}\t#{window_layout}"
+        do {
+            let lines = try await session.runCommand(
+                "list-windows -F \"\(format)\"\n",
+                write: { try await shell.write($0) }
+            )
+            let snaps = lines.compactMap(parseWindowSnapshot)
+            session.bootstrap(windows: snaps)
+
+            // After we know the active window's layout, dump each
+            // pane's existing scrollback into its driver so the user
+            // doesn't see empty panes — tmux doesn't replay buffered
+            // pane content to attaching clients.
+            if let active = snaps.first(where: { $0.isActive }),
+               let raw = active.layout,
+               let layout = try? TmuxLayout.parse(raw)
+            {
+                for paneID in layout.paneIDs {
+                    await capturePane(paneID: paneID)
+                }
+            }
+        } catch {
+            // Best-effort — without windows the user can still create
+            // new ones, so don't surface this as a hard failure.
+        }
+    }
+
+    /// Dump pane scrollback into its `TerminalDriver`. Each response
+    /// line is one row of the pane buffer; control bytes come back
+    /// octal-escaped (`\033`, etc.) so we run them through
+    /// `OutputDecoder` and then rejoin with CRLF before feeding the
+    /// terminal.
+    private func capturePane(paneID: Int) async {
+        guard let shell else { return }
+        guard let driver = session.driver(for: paneID) else { return }
+        // If tmux already pushed live output for this pane (e.g. a
+        // freshly-created session printing its bash prompt right
+        // after attach), the driver's buffer is non-empty and any
+        // `capture-pane` content would duplicate what's already on
+        // screen. Only capture cold panes — typical for attaching to
+        // a pre-existing session whose scrollback tmux doesn't replay.
+        guard driver.bufferedByteCount == 0 else { return }
+        do {
+            let lines = try await session.runCommand(
+                "capture-pane -p -e -S - -t %\(paneID)\n",
+                write: { try await shell.write($0) }
+            )
+            guard !lines.isEmpty else { return }
+            var bytes = Data()
+            for (idx, line) in lines.enumerated() {
+                bytes.append(OutputDecoder.decode(line))
+                if idx < lines.count - 1 {
+                    bytes.append(contentsOf: [0x0D, 0x0A])
+                }
+            }
+            driver.feed(bytes)
+        } catch {
+            // Capture failure is harmless — the pane just stays empty
+            // until new output arrives.
+        }
+    }
+
+    private func parseWindowSnapshot(_ line: String) -> TmuxSession.WindowSnapshot? {
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+        guard parts.count >= 4 else { return nil }
+        let rawID = parts[0]
+        guard rawID.first == "@", let id = Int(rawID.dropFirst()) else { return nil }
+        let isActive = parts[1] == "1"
+        let name = parts[2].isEmpty ? nil : String(parts[2])
+        let layout = parts[3].isEmpty ? nil : String(parts[3])
+        return TmuxSession.WindowSnapshot(
+            id: id,
+            name: name,
+            isActive: isActive,
+            layout: layout
+        )
+    }
+
+    /// Wrap a session name in single quotes for the tmux command line.
+    /// Single-quote any single-quotes inside via the standard
+    /// `'\''` close-reopen trick.
+    private func shellEscape(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

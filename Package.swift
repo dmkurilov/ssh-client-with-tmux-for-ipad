@@ -72,6 +72,7 @@ let package = Package(
             name: "TerminalKit",
             dependencies: [
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                "ColorSchemes",
             ],
             path: "Sources/TerminalKit"
         ),

@@ -23,6 +23,11 @@ public final class TerminalDriver {
         self.maxBufferedBytes = maxBufferedBytes
     }
 
+    /// How many bytes have been fed in. Callers check this to decide
+    /// whether `capture-pane` would duplicate live output already
+    /// pushed via `%output`.
+    public var bufferedByteCount: Int { buffer.count }
+
     /// Push bytes from the remote (or any source) into the terminal.
     /// Must be called on the main actor. Always buffers; also feeds
     /// the view directly if one is bound.

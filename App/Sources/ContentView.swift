@@ -6,12 +6,14 @@ import SwiftUI
 struct ContentView: View {
     @State private var store = HostStore()
     @State private var tofu = TOFUCoordinator()
+    @State private var settings = SettingsStore()
 
     var body: some View {
         NavigationStack {
             HostListView(
                 store: store,
                 tofu: tofu,
+                settings: settings,
                 keyData: SmokeTestConfig.privateKeyData
             )
         }

@@ -5,9 +5,12 @@ import SwiftUI
 struct HostListView: View {
     let store: HostStore
     let tofu: TOFUCoordinator
+    let settings: SettingsStore
     let keyData: Data?
 
     @State private var showingAdd = false
+    @State private var showingSettings = false
+    @State private var sharingLog = false
 
     var body: some View {
         List {
@@ -17,6 +20,7 @@ struct HostListView: View {
                         host: host,
                         store: store,
                         tofu: tofu,
+                        settings: settings,
                         keyData: keyData
                     )
                 } label: {
@@ -38,6 +42,20 @@ struct HostListView: View {
         }
         .navigationTitle("Hosts")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+            }
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    sharingLog = true
+                } label: {
+                    Image(systemName: "ladybug")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingAdd = true
@@ -54,6 +72,16 @@ struct HostListView: View {
                 } onCancel: {
                     showingAdd = false
                 }
+            }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(settings: settings) {
+                showingSettings = false
+            }
+        }
+        .sheet(isPresented: $sharingLog) {
+            DebugLogShareSheet(url: FileLogger.shared.url) {
+                sharingLog = false
             }
         }
     }

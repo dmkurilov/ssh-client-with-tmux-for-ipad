@@ -7,6 +7,7 @@ struct HostDetailView: View {
     let host: Host
     let store: HostStore
     let tofu: TOFUCoordinator
+    let settings: SettingsStore
     let keyData: Data?
 
     @State private var output: String = ""
@@ -35,7 +36,7 @@ struct HostDetailView: View {
 
                 NavigationLink {
                     if let keyData {
-                        RemoteShellView(host: host, keyData: keyData, tofu: tofu)
+                        RemoteShellView(host: host, keyData: keyData, tofu: tofu, settings: settings)
                     } else {
                         Text("No private key configured.")
                     }
@@ -46,7 +47,13 @@ struct HostDetailView: View {
 
                 NavigationLink {
                     if let keyData {
-                        TmuxSessionView(host: host, keyData: keyData, tofu: tofu)
+                        TmuxSessionView(
+                            host: host,
+                            keyData: keyData,
+                            tofu: tofu,
+                            settings: settings,
+                            store: store
+                        )
                     } else {
                         Text("No private key configured.")
                     }

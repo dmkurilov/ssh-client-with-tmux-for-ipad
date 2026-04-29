@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 import SwiftTerm
 import UIKit
+import ColorSchemes
 
 /// SwiftUI wrapper around SwiftTerm's iOS `TerminalView`. Provides
 /// real ANSI rendering, colors, scroll-back, and keyboard input
@@ -15,15 +16,18 @@ import UIKit
 ///     these to whatever PTY backs the session.
 public struct SwiftTermView: UIViewRepresentable {
     let driver: TerminalDriver
+    let scheme: ColorSchemes.ColorScheme?
     let onInput: (Data) -> Void
     let onSizeChange: (Int, Int) -> Void
 
     public init(
         driver: TerminalDriver,
+        scheme: ColorSchemes.ColorScheme? = nil,
         onInput: @escaping (Data) -> Void,
         onSizeChange: @escaping (Int, Int) -> Void = { _, _ in }
     ) {
         self.driver = driver
+        self.scheme = scheme
         self.onInput = onInput
         self.onSizeChange = onSizeChange
     }
@@ -31,34 +35,43 @@ public struct SwiftTermView: UIViewRepresentable {
     public func makeUIView(context: Context) -> SwiftTerm.TerminalView {
         let view = SwiftTerm.TerminalView()
         view.terminalDelegate = context.coordinator
-        // Defer bind to the next runloop tick: by then SwiftUI has
-        // applied a layout pass and SwiftTerm's `layoutSubviews` has
-        // computed real cell dimensions. Replaying buffered bytes
-        // against the live size avoids the cols≈0 wrap-each-char bug.
-        let driver = self.driver
-        DispatchQueue.main.async {
-            driver.bind(view)
+        if let scheme {
+            ColorSchemeApply.apply(scheme, to: view)
         }
+        // We *don't* bind here. SwiftTerm computes cols/rows from its
+        // frame, and at makeUIView time the frame can still be zero
+        // (especially in nested SwiftUI like GeometryReader inside a
+        // split layout). Binding too early would replay buffered
+        // bytes against a 0/2-column terminal — they'd hard-wrap one
+        // char per line. Instead the coordinator binds the first
+        // time `sizeChanged` reports a real width.
         return view
     }
 
     public func updateUIView(_ uiView: SwiftTerm.TerminalView, context: Context) {
-        // No-op; bytes are pushed via the driver and input is forwarded
-        // through the delegate. SwiftUI doesn't need to drive updates.
+        // Re-apply the scheme on update so changing it from a
+        // settings sheet recolors live terminals without remounting.
+        if let scheme {
+            ColorSchemeApply.apply(scheme, to: uiView)
+        }
     }
 
     public func makeCoordinator() -> Coordinator {
-        Coordinator(onInput: onInput, onSizeChange: onSizeChange)
+        Coordinator(driver: driver, onInput: onInput, onSizeChange: onSizeChange)
     }
 
     public final class Coordinator: NSObject, SwiftTerm.TerminalViewDelegate {
+        let driver: TerminalDriver
         let onInput: (Data) -> Void
         let onSizeChange: (Int, Int) -> Void
+        private var hasBound = false
 
         init(
+            driver: TerminalDriver,
             onInput: @escaping (Data) -> Void,
             onSizeChange: @escaping (Int, Int) -> Void
         ) {
+            self.driver = driver
             self.onInput = onInput
             self.onSizeChange = onSizeChange
         }
@@ -70,6 +83,17 @@ public struct SwiftTermView: UIViewRepresentable {
         }
 
         public func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
+            // First plausible size triggers the buffer replay. Use a
+            // small threshold so a transient `(2, 2)` from an early
+            // layout pass doesn't lock us into wrap-each-char mode.
+            // SwiftTerm calls delegates on the main thread, but the
+            // protocol isn't `@MainActor`, so we have to assert it.
+            if !hasBound, newCols >= 10, newRows >= 3 {
+                MainActor.assumeIsolated {
+                    driver.bind(source)
+                }
+                hasBound = true
+            }
             onSizeChange(newCols, newRows)
         }
 
