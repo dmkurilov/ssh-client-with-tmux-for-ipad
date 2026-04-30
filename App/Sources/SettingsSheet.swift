@@ -10,6 +10,8 @@ struct SettingsSheet: View {
 
     @State private var addingKey = false
     @Bindable private var transcripts = TranscriptStore.shared
+    @Bindable private var fileLogger = FileLogger.shared
+    @Bindable private var consent = RecordingConsent.shared
 
     var body: some View {
         NavigationStack {
@@ -52,7 +54,26 @@ struct SettingsSheet: View {
                 }
 
                 Section {
+                    Toggle("Write debug log", isOn: $fileLogger.enabled)
+                    if fileLogger.enabled, let granted = consent.grantedAt {
+                        consentCountdown(since: granted)
+                    }
+                    NavigationLink {
+                        DebugLogDetailView(fileLogger: fileLogger)
+                    } label: {
+                        Label("Browse debug log", systemImage: "doc.text")
+                    }
+                } header: {
+                    Text("Debug")
+                } footer: {
+                    Text("Off by default. When enabled, every parsed tmux event and outgoing command is appended to `Documents/debug.log`. Useful when reproducing a bug.")
+                }
+
+                Section {
                     Toggle("Record transcripts", isOn: $transcripts.enabled)
+                    if transcripts.enabled, let granted = consent.grantedAt {
+                        consentCountdown(since: granted)
+                    }
                     NavigationLink {
                         TranscriptListView(store: transcripts)
                     } label: {
@@ -61,7 +82,7 @@ struct SettingsSheet: View {
                 } header: {
                     Text("Transcripts")
                 } footer: {
-                    Text("Off by default. When enabled, raw pane output is appended to `Documents/transcripts/` per pane. Files contain ANSI escape sequences — terminal output may include secrets.")
+                    Text("Off by default. When enabled, raw pane output is appended to `Documents/transcripts/` per pane. Files contain ANSI escape sequences — terminal output may include secrets. Shares the consent timer with the debug log.")
                 }
             }
             .navigationTitle("Settings")
@@ -73,6 +94,29 @@ struct SettingsSheet: View {
             }
             .sheet(isPresented: $addingKey) {
                 KeyFormView(store: keyStore) { addingKey = false }
+            }
+            .sheet(isPresented: $consent.pendingPrompt) {
+                LongRunningRecordingSheet {
+                    consent.pendingPrompt = false
+                }
+            }
+        }
+    }
+
+    /// Live countdown that ticks every second. When it hits zero the
+    /// foreground poll in `ContentView` raises the re-consent sheet.
+    private func consentCountdown(since: Date) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let remaining = LongRunningRecordingSheet.staleAfter
+                - context.date.timeIntervalSince(since)
+            if remaining <= 0 {
+                Text("Consent is expired")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.red)
+            } else {
+                Text("Consent expires in \(formatExpiry(remaining))")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(remaining < 60 ? .orange : .secondary)
             }
         }
     }

@@ -22,6 +22,7 @@ final class TranscriptStore {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
             if !enabled { closeAll() }
+            RecordingConsent.shared.reconcile()
         }
     }
 

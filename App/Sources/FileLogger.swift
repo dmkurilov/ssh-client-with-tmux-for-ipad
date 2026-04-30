@@ -1,19 +1,27 @@
 import Foundation
+import Observation
 
-/// Append-only debug log living in the app's Documents folder so it
-/// survives across runs and is reachable from the iOS Files app
-/// (under "On My iPad → ssh-client-tmux") and via Xcode's device
-/// container browser.
-///
-/// The file is also exposed by the "Share debug log" button on the
-/// host list, which presents the standard share sheet for AirDrop
-/// or the Files app.
+/// Opt-in append-only debug log. When `enabled`, every
+/// `session.logDebug` call also lands in `Documents/debug.log` so we
+/// can ship traces home for analysis. Off by default — the in-memory
+/// overlay (the ladybug toggle inside a tmux view) keeps working
+/// regardless because it lives in `TmuxSession.debugLog`.
 @MainActor
+@Observable
 final class FileLogger {
     static let shared = FileLogger()
 
     let url: URL
     private let formatter: DateFormatter
+
+    private static let enabledKey = "DebugLogEnabled"
+
+    var enabled: Bool {
+        didSet {
+            UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
+            RecordingConsent.shared.reconcile()
+        }
+    }
 
     private init() {
         let docs = try! FileManager.default.url(
@@ -25,9 +33,11 @@ final class FileLogger {
         url = docs.appendingPathComponent("debug.log")
         formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
+        self.enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
     }
 
     func log(_ message: String) {
+        guard enabled else { return }
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
         if FileManager.default.fileExists(atPath: url.path) {

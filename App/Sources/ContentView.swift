@@ -16,6 +16,8 @@ struct ContentView: View {
 
     @State private var path: [UUID] = []
     @State private var prefillForNewHost: Host?
+    @Bindable private var consent = RecordingConsent.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -65,6 +67,27 @@ struct ContentView: View {
             }
         }
         .onOpenURL(perform: handleIncomingURL)
+        .task {
+            // Poll while the app is alive so the prompt fires even
+            // if the user never backgrounds. The check is essentially
+            // free; the sheet only appears when staleness flips on.
+            while !Task.isCancelled {
+                checkStaleRecordings()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { checkStaleRecordings() }
+        }
+        .sheet(isPresented: $consent.pendingPrompt) {
+            LongRunningRecordingSheet { consent.pendingPrompt = false }
+        }
+    }
+
+    private func checkStaleRecordings() {
+        if LongRunningRecordingSheet.shouldShow() {
+            consent.pendingPrompt = true
+        }
     }
 
     /// `ssh://[user@]host[:port]` → either push the existing host's
