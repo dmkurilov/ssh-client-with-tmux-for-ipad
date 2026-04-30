@@ -87,6 +87,27 @@ final class TmuxSession {
         drivers[paneID]
     }
 
+    /// Find which window currently owns `paneID`. Used to label
+    /// transcript filenames so you can tell pane 12 of window @5
+    /// from pane 12 of window @9.
+    ///
+    /// Two paths because layout vs output events race on attach:
+    ///   1. `%layout-change` already arrived → walk `layout.paneIDs`.
+    ///   2. Layout missing but `%output` set `activePaneID` via the
+    ///      bootstrap heuristic in `handle(.output)` → match that.
+    /// Returns `nil` only when neither has placed the pane yet.
+    func windowID(forPane paneID: Int) -> Int? {
+        for w in windows {
+            if let layout = w.layout, layout.paneIDs.contains(paneID) {
+                return w.id
+            }
+            if w.activePaneID == paneID {
+                return w.id
+            }
+        }
+        return nil
+    }
+
     /// Send a tmux control-mode command and await its response lines.
     /// `command` must end with a newline. Caller supplies the writer
     /// closure (the SSH shell) so this stays free of SSHCore deps.

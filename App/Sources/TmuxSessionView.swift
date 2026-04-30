@@ -146,6 +146,7 @@ struct TmuxSessionView: View {
             // screen mid-attach.
             if let name = session.sessionName {
                 store.updateLastTmuxSession(hostID: host.id, name: name)
+                TranscriptStore.shared.close(host: host.host, session: name)
             }
             Task {
                 await shell?.close()
@@ -718,6 +719,15 @@ struct TmuxSessionView: View {
                         await MainActor.run {
                             for event in events {
                                 self.session.handle(event)
+                                if case .output(let pid, let payload) = event {
+                                    TranscriptStore.shared.feed(
+                                        host: host.host,
+                                        session: session.sessionName ?? "default",
+                                        windowID: session.windowID(forPane: pid),
+                                        paneID: pid,
+                                        data: payload
+                                    )
+                                }
                             }
                             if self.session.isAttached, self.statusMessage != "attached" {
                                 self.statusMessage = "attached"

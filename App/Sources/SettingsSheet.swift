@@ -9,6 +9,7 @@ struct SettingsSheet: View {
     let onDone: () -> Void
 
     @State private var addingKey = false
+    @Bindable private var transcripts = TranscriptStore.shared
 
     var body: some View {
         NavigationStack {
@@ -48,6 +49,19 @@ struct SettingsSheet: View {
                             Image(systemName: "plus")
                         }
                     }
+                }
+
+                Section {
+                    Toggle("Record transcripts", isOn: $transcripts.enabled)
+                    NavigationLink {
+                        TranscriptListView(store: transcripts)
+                    } label: {
+                        Label("Browse transcripts", systemImage: "doc.text")
+                    }
+                } header: {
+                    Text("Transcripts")
+                } footer: {
+                    Text("Off by default. When enabled, raw pane output is appended to `Documents/transcripts/` per pane. Files contain ANSI escape sequences — terminal output may include secrets.")
                 }
             }
             .navigationTitle("Settings")
