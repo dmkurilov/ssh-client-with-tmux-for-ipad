@@ -3,6 +3,10 @@ import SwiftUI
 /// Add / edit a host. Pass `initial: nil` for create, an existing
 /// `Host` for edit. The id is preserved on edit so the navigation
 /// state (and saved associations) survive.
+///
+/// `prefill` is honoured only in create mode (`initial == nil`):
+/// pre-populates the field state without flipping the form into
+/// edit mode. Used when the app receives an `ssh://` URL.
 struct HostFormView: View {
     let initial: Host?
     let keyStore: KeyStore
@@ -17,6 +21,7 @@ struct HostFormView: View {
 
     init(
         initial: Host?,
+        prefill: Host? = nil,
         keyStore: KeyStore,
         onSave: @escaping (Host) -> Void,
         onCancel: @escaping () -> Void
@@ -25,11 +30,12 @@ struct HostFormView: View {
         self.keyStore = keyStore
         self.onSave = onSave
         self.onCancel = onCancel
-        _name = State(initialValue: initial?.name ?? "")
-        _host = State(initialValue: initial?.host ?? "")
-        _port = State(initialValue: String(initial?.port ?? 22))
-        _user = State(initialValue: initial?.user ?? "")
-        _keyID = State(initialValue: initial?.keyID ?? keyStore.keys.first?.id)
+        let seed = initial ?? prefill
+        _name = State(initialValue: seed?.name ?? "")
+        _host = State(initialValue: seed?.host ?? "")
+        _port = State(initialValue: String(seed?.port ?? 22))
+        _user = State(initialValue: seed?.user ?? "")
+        _keyID = State(initialValue: seed?.keyID ?? keyStore.keys.first?.id)
     }
 
     private var canSave: Bool {

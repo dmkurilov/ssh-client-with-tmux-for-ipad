@@ -4,7 +4,6 @@ import SwiftUI
 /// "+" presents the add-host sheet; swipe-to-delete works on rows.
 struct HostListView: View {
     let store: HostStore
-    let tofu: TOFUCoordinator
     let settings: SettingsStore
     let keyStore: KeyStore
 
@@ -16,15 +15,7 @@ struct HostListView: View {
     var body: some View {
         List {
             ForEach(store.hosts) { host in
-                NavigationLink {
-                    HostDetailView(
-                        host: host,
-                        store: store,
-                        tofu: tofu,
-                        settings: settings,
-                        keyStore: keyStore
-                    )
-                } label: {
+                NavigationLink(value: host.id) {
                     HostRow(host: host)
                 }
             }
