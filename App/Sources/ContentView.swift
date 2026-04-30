@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var store = HostStore()
     @State private var tofu = TOFUCoordinator()
     @State private var settings = SettingsStore()
+    @State private var keyStore = KeyStore()
 
     var body: some View {
         NavigationStack {
@@ -14,7 +15,7 @@ struct ContentView: View {
                 store: store,
                 tofu: tofu,
                 settings: settings,
-                keyData: SmokeTestConfig.privateKeyData
+                keyStore: keyStore
             )
         }
         .sheet(

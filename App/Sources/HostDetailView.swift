@@ -8,12 +8,16 @@ struct HostDetailView: View {
     let store: HostStore
     let tofu: TOFUCoordinator
     let settings: SettingsStore
-    let keyData: Data?
+    let keyStore: KeyStore
 
     @State private var output: String = ""
     @State private var errorMessage: String?
     @State private var isRunning = false
     @State private var showingEdit = false
+
+    private var hasKey: Bool {
+        host.keyID != nil || !keyStore.keys.isEmpty
+    }
 
     var body: some View {
         Form {
@@ -21,6 +25,13 @@ struct HostDetailView: View {
                 LabeledContent("Host", value: host.host)
                 LabeledContent("Port", value: "\(host.port)")
                 LabeledContent("User", value: host.user)
+                if let kid = host.keyID,
+                   let meta = keyStore.keys.first(where: { $0.id == kid })
+                {
+                    LabeledContent("Key", value: meta.name)
+                } else if let first = keyStore.keys.first {
+                    LabeledContent("Key", value: "\(first.name) (default)")
+                }
             }
 
             Section("Actions") {
@@ -32,35 +43,27 @@ struct HostDetailView: View {
                         Text(isRunning ? "Connecting…" : "Run `uname -a`")
                     }
                 }
-                .disabled(isRunning || keyData == nil)
+                .disabled(isRunning || !hasKey)
 
                 NavigationLink {
-                    if let keyData {
-                        RemoteShellView(host: host, keyData: keyData, tofu: tofu, settings: settings)
-                    } else {
-                        Text("No private key configured.")
-                    }
+                    RemoteShellView(host: host, tofu: tofu, settings: settings, keyStore: keyStore)
                 } label: {
                     Text("Open shell")
                 }
-                .disabled(keyData == nil)
+                .disabled(!hasKey)
 
                 NavigationLink {
-                    if let keyData {
-                        TmuxSessionView(
-                            host: host,
-                            keyData: keyData,
-                            tofu: tofu,
-                            settings: settings,
-                            store: store
-                        )
-                    } else {
-                        Text("No private key configured.")
-                    }
+                    TmuxSessionView(
+                        host: host,
+                        tofu: tofu,
+                        settings: settings,
+                        store: store,
+                        keyStore: keyStore
+                    )
                 } label: {
                     Text("Open tmux")
                 }
-                .disabled(keyData == nil)
+                .disabled(!hasKey)
             }
 
             if !output.isEmpty {
@@ -79,9 +82,9 @@ struct HostDetailView: View {
                 }
             }
 
-            if keyData == nil {
+            if !hasKey {
                 Section {
-                    Text("Add `private-key` to `~/.ssh-client-tmux-smoke/` and rebuild to enable connections.")
+                    Text("No SSH key configured. Add one in Settings → SSH keys.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -98,7 +101,7 @@ struct HostDetailView: View {
         }
         .sheet(isPresented: $showingEdit) {
             NavigationStack {
-                HostFormView(initial: host) { updated in
+                HostFormView(initial: host, keyStore: keyStore) { updated in
                     store.update(updated)
                     showingEdit = false
                 } onCancel: {
@@ -109,23 +112,22 @@ struct HostDetailView: View {
     }
 
     private func runUname() async {
-        guard let keyData else { return }
         isRunning = true
         output = ""
         errorMessage = nil
         defer { isRunning = false }
-
-        let endpoint = SSHEndpoint(host: host.host, port: host.port, user: host.user)
-        let verifier = KnownHostsVerifier(
-            knownHostsURL: KnownHostsLocation.url,
-            prompter: { [tofu] prompt in
-                await tofu.awaitDecision(for: prompt)
-            }
-        )
         do {
+            let creds = try await loadCredentials()
+            let endpoint = SSHEndpoint(host: host.host, port: host.port, user: host.user)
+            let verifier = KnownHostsVerifier(
+                knownHostsURL: KnownHostsLocation.url,
+                prompter: { [tofu] prompt in
+                    await tofu.awaitDecision(for: prompt)
+                }
+            )
             let connection = try await SSHConnection.connect(
                 endpoint: endpoint,
-                credentials: .privateKey(keyData),
+                credentials: creds,
                 hostKeyVerifier: verifier
             )
             let result = try await connection.exec("uname -a")
@@ -135,4 +137,18 @@ struct HostDetailView: View {
             errorMessage = "\(error)"
         }
     }
+
+    private func loadCredentials() async throws -> Credentials {
+        let id = host.keyID ?? keyStore.keys.first?.id
+        guard let id else { throw NoKeyError() }
+        let (meta, data) = try await keyStore.load(
+            id,
+            prompt: "Authenticate to use SSH key for \(host.name)"
+        )
+        return KeyStore.credentials(for: meta, data: data)
+    }
+}
+
+private struct NoKeyError: LocalizedError {
+    var errorDescription: String? { "No SSH key configured for this host." }
 }

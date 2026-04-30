@@ -13,12 +13,15 @@ public struct SSHEndpoint: Sendable, Equatable {
     }
 }
 
-/// How to authenticate. v1 supports password and **unencrypted
-/// OpenSSH ed25519** private keys only — passphrase-encrypted keys,
-/// RSA, ECDSA, and others are deferred.
+/// How to authenticate. v1 supports password, OpenSSH-PEM ed25519
+/// private keys, and the raw 32-byte Curve25519 form (which is what
+/// the in-app Keychain store hands us for generated keys, so we
+/// don't have to round-trip through OpenSSH PEM encoding).
+/// Passphrase-encrypted keys, RSA, ECDSA, and others are deferred.
 public enum Credentials: Sendable {
     case password(String)
     case privateKey(Data)
+    case ed25519Raw(Data)   // 32-byte raw Curve25519 seed
 }
 
 /// Output of a one-shot remote command.

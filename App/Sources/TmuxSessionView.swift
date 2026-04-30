@@ -11,10 +11,10 @@ import TerminalKit
 /// without shell-quoting headaches.
 struct TmuxSessionView: View {
     let host: Host
-    let keyData: Data
     let tofu: TOFUCoordinator
     let settings: SettingsStore
     let store: HostStore
+    let keyStore: KeyStore
 
     @State private var connection: SSHConnection?
     @State private var shell: SSHShellSession?
@@ -627,9 +627,10 @@ struct TmuxSessionView: View {
             }
         )
         do {
+            let creds = try await loadCredentials()
             let conn = try await SSHConnection.connect(
                 endpoint: endpoint,
-                credentials: .privateKey(keyData),
+                credentials: creds,
                 hostKeyVerifier: verifier
             )
             await MainActor.run {
@@ -832,5 +833,21 @@ struct TmuxSessionView: View {
     /// `'\''` close-reopen trick.
     private func shellEscape(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func loadCredentials() async throws -> Credentials {
+        let id = host.keyID ?? keyStore.keys.first?.id
+        guard let id else {
+            throw NSError(
+                domain: "TmuxSessionView",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No SSH key configured for this host."]
+            )
+        }
+        let (meta, data) = try await keyStore.load(
+            id,
+            prompt: "Authenticate to use SSH key for \(host.name)"
+        )
+        return KeyStore.credentials(for: meta, data: data)
     }
 }

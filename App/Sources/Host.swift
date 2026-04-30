@@ -11,6 +11,9 @@ struct Host: Identifiable, Hashable, Codable {
     /// skip the picker on subsequent connects when the session still
     /// exists. Optional in JSON for back-compat with older host files.
     var lastTmuxSession: String?
+    /// Identifier of a `KeyMetadata` in `KeyStore`. `nil` means we
+    /// fall back to the bundled smoke-test key (legacy dev path).
+    var keyID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -18,7 +21,8 @@ struct Host: Identifiable, Hashable, Codable {
         host: String,
         port: Int = 22,
         user: String,
-        lastTmuxSession: String? = nil
+        lastTmuxSession: String? = nil,
+        keyID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -26,5 +30,6 @@ struct Host: Identifiable, Hashable, Codable {
         self.port = port
         self.user = user
         self.lastTmuxSession = lastTmuxSession
+        self.keyID = keyID
     }
 }

@@ -10,9 +10,9 @@ import TerminalKit
 /// state work.
 struct RemoteShellView: View {
     let host: Host
-    let keyData: Data
     let tofu: TOFUCoordinator
     let settings: SettingsStore
+    let keyStore: KeyStore
 
     @State private var connection: SSHConnection?
     @State private var session: SSHShellSession?
@@ -167,9 +167,10 @@ struct RemoteShellView: View {
             }
         )
         do {
+            let creds = try await loadCredentials()
             let conn = try await SSHConnection.connect(
                 endpoint: endpoint,
-                credentials: .privateKey(keyData),
+                credentials: creds,
                 hostKeyVerifier: verifier
             )
             let shell = try await conn.openShell()
@@ -219,5 +220,21 @@ struct RemoteShellView: View {
                 }
             }
         }
+    }
+
+    private func loadCredentials() async throws -> Credentials {
+        let id = host.keyID ?? keyStore.keys.first?.id
+        guard let id else {
+            throw NSError(
+                domain: "RemoteShellView",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No SSH key configured for this host."]
+            )
+        }
+        let (meta, data) = try await keyStore.load(
+            id,
+            prompt: "Authenticate to use SSH key for \(host.name)"
+        )
+        return KeyStore.credentials(for: meta, data: data)
     }
 }

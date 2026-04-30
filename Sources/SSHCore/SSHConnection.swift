@@ -52,6 +52,15 @@ public actor SSHConnection {
                     reason: "OpenSSH ed25519 parse failed: \(error). v1 supports OpenSSH ed25519 keys only."
                 )
             }
+        case .ed25519Raw(let raw):
+            do {
+                let pk = try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
+                auth = .ed25519(username: endpoint.user, privateKey: pk)
+            } catch {
+                throw SSHError.unsupportedKeyFormat(
+                    reason: "raw ed25519 key construction failed: \(error)"
+                )
+            }
         }
 
         let adapter = HostKeyVerifierAdapter(

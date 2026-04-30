@@ -6,7 +6,7 @@ struct HostListView: View {
     let store: HostStore
     let tofu: TOFUCoordinator
     let settings: SettingsStore
-    let keyData: Data?
+    let keyStore: KeyStore
 
     @State private var showingAdd = false
     @State private var showingSettings = false
@@ -21,7 +21,7 @@ struct HostListView: View {
                         store: store,
                         tofu: tofu,
                         settings: settings,
-                        keyData: keyData
+                        keyStore: keyStore
                     )
                 } label: {
                     HostRow(host: host)
@@ -66,7 +66,7 @@ struct HostListView: View {
         }
         .sheet(isPresented: $showingAdd) {
             NavigationStack {
-                HostFormView(initial: nil) { newHost in
+                HostFormView(initial: nil, keyStore: keyStore) { newHost in
                     store.add(newHost)
                     showingAdd = false
                 } onCancel: {
@@ -75,7 +75,7 @@ struct HostListView: View {
             }
         }
         .sheet(isPresented: $showingSettings) {
-            SettingsSheet(settings: settings) {
+            SettingsSheet(settings: settings, keyStore: keyStore) {
                 showingSettings = false
             }
         }
