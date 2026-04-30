@@ -11,6 +11,7 @@ struct HostListView: View {
     @State private var showingAdd = false
     @State private var showingSettings = false
     @State private var sharingLog = false
+    @State private var importingConfig = false
 
     var body: some View {
         List {
@@ -58,6 +59,13 @@ struct HostListView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    importingConfig = true
+                } label: {
+                    Image(systemName: "square.and.arrow.down.on.square")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     showingAdd = true
                 } label: {
                     Image(systemName: "plus")
@@ -82,6 +90,11 @@ struct HostListView: View {
         .sheet(isPresented: $sharingLog) {
             DebugLogShareSheet(url: FileLogger.shared.url) {
                 sharingLog = false
+            }
+        }
+        .sheet(isPresented: $importingConfig) {
+            SSHConfigImportSheet(store: store) {
+                importingConfig = false
             }
         }
     }

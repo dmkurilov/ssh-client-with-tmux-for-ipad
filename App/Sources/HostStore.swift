@@ -52,6 +52,11 @@ final class HostStore {
         persist()
     }
 
+    func remove(id: UUID) {
+        hosts.removeAll { $0.id == id }
+        persist()
+    }
+
     private func persist() {
         try? Self.save(hosts)
     }

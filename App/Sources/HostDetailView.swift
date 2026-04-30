@@ -14,6 +14,9 @@ struct HostDetailView: View {
     @State private var errorMessage: String?
     @State private var isRunning = false
     @State private var showingEdit = false
+    @State private var confirmingDelete = false
+
+    @Environment(\.dismiss) private var dismiss
 
     private var hasKey: Bool {
         host.keyID != nil || !keyStore.keys.isEmpty
@@ -89,6 +92,28 @@ struct HostDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Section {
+                Button(role: .destructive) {
+                    confirmingDelete = true
+                } label: {
+                    Label("Delete host", systemImage: "trash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete \(host.name)?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                store.remove(id: host.id)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the host record only. Your SSH key and remote tmux sessions are unaffected.")
         }
         .navigationTitle(host.name)
         .navigationBarTitleDisplayMode(.inline)
