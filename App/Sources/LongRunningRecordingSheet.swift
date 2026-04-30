@@ -71,10 +71,10 @@ struct LongRunningRecordingSheet: View {
         onDismiss()
     }
 
-    /// FIXME(test): bump back to `24 * 60 * 60` once we've confirmed
-    /// the prompt fires. 60s is a stand-in so we can see the sheet
-    /// without waiting a day.
-    static let staleAfter: TimeInterval = 60
+    /// Re-consent window. Currently 1 hour — short enough that we
+    /// don't quietly leave recording on for days, long enough that
+    /// it doesn't interrupt a normal coding session.
+    static let staleAfter: TimeInterval = 60 * 60
 
     @MainActor
     static func shouldShow(now: Date = Date()) -> Bool {
