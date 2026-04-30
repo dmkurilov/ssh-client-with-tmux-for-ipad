@@ -15,6 +15,10 @@ struct TmuxSessionView: View {
     let settings: SettingsStore
     let store: HostStore
     let keyStore: KeyStore
+    /// When true, skip the auto-attach to `host.lastTmuxSession` and
+    /// always show the picker. Used by the "List tmux sessions" entry
+    /// on the host detail screen.
+    var forceShowPicker: Bool = false
 
     @State private var connection: SSHConnection?
     @State private var shell: SSHShellSession?
@@ -27,6 +31,10 @@ struct TmuxSessionView: View {
     @State private var availableSessions: [TmuxSessionInfo] = []
     @State private var showingAttachPicker = false
     @State private var showingDebug = false
+    @State private var renamingWindowID: Int?
+    @State private var renameText: String = ""
+    @State private var renamingSession = false
+    @State private var sessionRenameText: String = ""
     /// `@State` on a class-type session persists across `NavigationStack`
     /// pop+push, so on a fresh appear the session may still hold the
     /// previous attach's `sessionID`. Without this flag, the next
@@ -55,6 +63,19 @@ struct TmuxSessionView: View {
         .navigationTitle(session.sessionName.map { "tmux: \($0)" } ?? "tmux")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Replace the default centered title with a custom one
+            // that supports long-press → "Rename session". Tapping
+            // an item doesn't conflict with rename because long-press
+            // is a separate gesture.
+            ToolbarItem(placement: .principal) {
+                Text(session.sessionName.map { "tmux: \($0)" } ?? "tmux")
+                    .font(.headline)
+                    .onLongPressGesture {
+                        if session.sessionID != nil {
+                            beginRenameSession()
+                        }
+                    }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingSessions = true
@@ -71,16 +92,47 @@ struct TmuxSessionView: View {
                 }
             }
         }
+        .alert(
+            renamingWindowID.map { "Rename window @\($0)" } ?? "Rename window",
+            isPresented: Binding(
+                get: { renamingWindowID != nil },
+                set: { if !$0 { renamingWindowID = nil; renameText = "" } }
+            )
+        ) {
+            TextField("Name", text: $renameText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {
+                renamingWindowID = nil
+                renameText = ""
+            }
+            Button("Rename", action: commitRenameWindow)
+        }
+        .alert(
+            session.sessionID.map { "Rename session $\($0)" } ?? "Rename session",
+            isPresented: $renamingSession
+        ) {
+            TextField("Name", text: $sessionRenameText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {
+                sessionRenameText = ""
+            }
+            Button("Rename", action: commitRenameSession)
+        }
         .sheet(isPresented: $showingAttachPicker) {
             TmuxAttachPickerSheet(
                 sessions: availableSessions,
-                onAttach: { name in
+                onAttach: { name, forceDetach in
                     showingAttachPicker = false
-                    Task { await attach(.existing(name)) }
+                    Task { await attach(.existing(name: name, forceDetach: forceDetach)) }
                 },
                 onCreate: { name in
                     showingAttachPicker = false
                     Task { await attach(.new(name)) }
+                },
+                onRename: { oldName, newName in
+                    Task { await renameSessionViaExec(old: oldName, new: newName) }
                 },
                 onCancel: {
                     showingAttachPicker = false
@@ -274,12 +326,13 @@ struct TmuxSessionView: View {
 
     private func tabButton(_ window: TmuxWindow) -> some View {
         let isActive = window.id == session.activeWindowID
-        let label = window.name.map { "@\(window.id) · \($0)" } ?? "@\(window.id)"
+        let label = window.name ?? "@\(window.id)"
         return HStack(spacing: 6) {
             Text(label)
                 .font(.caption.monospaced())
                 .contentShape(Rectangle())
                 .onTapGesture { selectWindow(window.id) }
+                .onLongPressGesture { beginRenameWindow(window) }
             Button {
                 closeWindow(window.id)
             } label: {
@@ -295,6 +348,35 @@ struct TmuxSessionView: View {
         .padding(.vertical, 6)
         .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func beginRenameWindow(_ window: TmuxWindow) {
+        renameText = window.name ?? ""
+        renamingWindowID = window.id
+    }
+
+    private func commitRenameWindow() {
+        guard let id = renamingWindowID else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            sendShellCommand("rename-window -t :@\(id) \(shellEscape(trimmed))\n")
+        }
+        renamingWindowID = nil
+        renameText = ""
+    }
+
+    private func beginRenameSession() {
+        sessionRenameText = session.sessionName ?? ""
+        renamingSession = true
+    }
+
+    private func commitRenameSession() {
+        guard let sid = session.sessionID else { return }
+        let trimmed = sessionRenameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamingSession = false
+        sessionRenameText = ""
+        guard !trimmed.isEmpty else { return }
+        sendShellCommand("rename-session -t $\(sid) \(shellEscape(trimmed))\n")
     }
 
     @ViewBuilder
@@ -605,13 +687,15 @@ struct TmuxSessionView: View {
     }
 
     private enum AttachChoice: CustomStringConvertible {
-        case existing(String)
+        case existing(name: String, forceDetach: Bool)
         case new(String?)   // nil → tmux picks a name
 
         var description: String {
             switch self {
-            case .existing(let name): return ".existing(\(name))"
-            case .new(let name): return ".new(\(name ?? "<auto>"))"
+            case .existing(let name, let force):
+                return ".existing(\(name), force=\(force))"
+            case .new(let name):
+                return ".new(\(name ?? "<auto>"))"
             }
         }
     }
@@ -642,10 +726,12 @@ struct TmuxSessionView: View {
             let sessions = try await probeSessions(conn: conn)
             await MainActor.run { self.availableSessions = sessions }
 
-            if let remembered = host.lastTmuxSession,
-               sessions.contains(where: { $0.name == remembered })
+            if !forceShowPicker,
+               let remembered = host.lastTmuxSession,
+               let match = sessions.first(where: { $0.name == remembered }),
+               !match.attached
             {
-                await attach(.existing(remembered))
+                await attach(.existing(name: remembered, forceDetach: false))
             } else {
                 await MainActor.run {
                     self.statusMessage = "choose tmux session"
@@ -657,6 +743,21 @@ struct TmuxSessionView: View {
                 self.errorMessage = "connect failed: \(error)"
                 self.statusMessage = "disconnected"
             }
+        }
+    }
+
+    /// Pre-attach session rename. We're not in `-CC` mode yet, so
+    /// the rename runs via the same SSH `exec` channel that probes
+    /// the session list. Refreshes `availableSessions` afterward so
+    /// the picker shows the new name.
+    private func renameSessionViaExec(old: String, new: String) async {
+        guard let conn = connection else { return }
+        let oldEsc = shellEscape(old)
+        let newEsc = shellEscape(new)
+        let inner = "tmux rename-session -t \(oldEsc) \(newEsc) 2>/dev/null; true"
+        _ = try? await conn.exec("$SHELL -lc '\(inner)'")
+        if let refreshed = try? await probeSessions(conn: conn) {
+            await MainActor.run { self.availableSessions = refreshed }
         }
     }
 
@@ -692,10 +793,19 @@ struct TmuxSessionView: View {
         }
         session.logDebug("attach: choice=\(choice)")
         do {
+            // For an attach where the user opted into force-detach,
+            // boot every other client off the target session before
+            // we open our control-mode session. Has to happen on the
+            // SSH `exec` channel because we're not in `-CC` mode yet.
+            if case .existing(let name, true) = choice {
+                let escaped = shellEscape(name)
+                let inner = "tmux detach-client -s \(escaped) 2>/dev/null; true"
+                _ = try? await conn.exec("$SHELL -lc '\(inner)'")
+            }
             let shellSession = try await conn.openShell()
             let cmd: String
             switch choice {
-            case .existing(let name):
+            case .existing(let name, _):
                 cmd = "tmux -CC attach-session -t \(shellEscape(name))\n"
             case .new(let maybeName):
                 if let name = maybeName, !name.isEmpty {

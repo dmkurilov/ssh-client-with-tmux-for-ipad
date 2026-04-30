@@ -8,12 +8,16 @@ import SwiftUI
 /// happens in the caller — this view is purely UI + choice.
 struct TmuxAttachPickerSheet: View {
     let sessions: [TmuxSessionInfo]
-    let onAttach: (String) -> Void          // existing session name
+    let onAttach: (_ name: String, _ forceDetach: Bool) -> Void
     let onCreate: (String?) -> Void         // nil → tmux picks a name
+    let onRename: (_ oldName: String, _ newName: String) -> Void
     let onCancel: () -> Void
 
     @State private var creating = false
     @State private var newName: String = ""
+    @State private var detachConfirmFor: TmuxSessionInfo?
+    @State private var renamingSession: TmuxSessionInfo?
+    @State private var renameText: String = ""
 
     var body: some View {
         NavigationStack {
@@ -21,11 +25,16 @@ struct TmuxAttachPickerSheet: View {
                 if !sessions.isEmpty {
                     Section("Existing") {
                         ForEach(sessions) { s in
-                            Button {
-                                onAttach(s.name)
-                            } label: {
-                                row(s)
-                            }
+                            row(s)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if s.attached {
+                                        detachConfirmFor = s
+                                    } else {
+                                        onAttach(s.name, false)
+                                    }
+                                }
+                                .onLongPressGesture { beginRename(s) }
                         }
                     }
                 }
@@ -57,6 +66,46 @@ struct TmuxAttachPickerSheet: View {
                     Button("Cancel", action: onCancel)
                 }
             }
+            .alert(
+                "Session is attached elsewhere",
+                isPresented: Binding(
+                    get: { detachConfirmFor != nil },
+                    set: { if !$0 { detachConfirmFor = nil } }
+                ),
+                presenting: detachConfirmFor
+            ) { target in
+                Button("Force detach", role: .destructive) {
+                    let name = target.name
+                    detachConfirmFor = nil
+                    onAttach(name, true)
+                }
+                Button("Attach without detaching", role: .none) {
+                    let name = target.name
+                    detachConfirmFor = nil
+                    onAttach(name, false)
+                }
+                Button("Cancel", role: .cancel) {
+                    detachConfirmFor = nil
+                }
+            } message: { target in
+                Text("'\(target.name)' is attached by another client. Force-detaching gives this device the session at iPad size; attaching without detaching shares the session and forces both clients to the smaller terminal size.")
+            }
+            .alert(
+                renamingSession.map { "Rename session $\($0.id)" } ?? "Rename session",
+                isPresented: Binding(
+                    get: { renamingSession != nil },
+                    set: { if !$0 { renamingSession = nil; renameText = "" } }
+                )
+            ) {
+                TextField("Name", text: $renameText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Cancel", role: .cancel) {
+                    renamingSession = nil
+                    renameText = ""
+                }
+                Button("Rename", action: commitRename)
+            }
         }
     }
 
@@ -78,7 +127,31 @@ struct TmuxAttachPickerSheet: View {
                     .background(Color.accentColor.opacity(0.18))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             }
+            Button {
+                beginRename(s)
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
         }
+    }
+
+    private func beginRename(_ s: TmuxSessionInfo) {
+        renameText = s.name
+        renamingSession = s
+    }
+
+    private func commitRename() {
+        guard let s = renamingSession else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamingSession = nil
+        renameText = ""
+        guard !trimmed.isEmpty, trimmed != s.name else { return }
+        onRename(s.name, trimmed)
     }
 
     private func submitNew() {

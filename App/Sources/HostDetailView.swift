@@ -67,6 +67,20 @@ struct HostDetailView: View {
                     Text("Open tmux")
                 }
                 .disabled(!hasKey)
+
+                NavigationLink {
+                    TmuxSessionView(
+                        host: host,
+                        tofu: tofu,
+                        settings: settings,
+                        store: store,
+                        keyStore: keyStore,
+                        forceShowPicker: true
+                    )
+                } label: {
+                    Text("List tmux sessions")
+                }
+                .disabled(!hasKey)
             }
 
             if !output.isEmpty {

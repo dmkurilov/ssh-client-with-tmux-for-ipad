@@ -19,6 +19,9 @@ struct TmuxSessionsSheet: View {
     @State private var sessions: [TmuxSessionInfo] = []
     @State private var loading = true
     @State private var errorMessage: String?
+    @State private var renamingSessionID: Int?
+    @State private var renameText: String = ""
+    @State private var detachConfirmFor: TmuxSessionInfo?
 
     var body: some View {
         NavigationStack {
@@ -57,11 +60,10 @@ struct TmuxSessionsSheet: View {
         } else {
             List {
                 ForEach(sessions) { s in
-                    Button {
-                        Task { await switchTo(s.id) }
-                    } label: {
-                        sessionRow(s)
-                    }
+                    sessionRow(s)
+                        .contentShape(Rectangle())
+                        .onTapGesture { handleTap(s) }
+                        .onLongPressGesture { beginRename(s) }
                 }
             }
             .overlay {
@@ -73,6 +75,95 @@ struct TmuxSessionsSheet: View {
                     )
                 }
             }
+            .alert(
+                renamingSessionID.map { "Rename session $\($0)" } ?? "Rename session",
+                isPresented: Binding(
+                    get: { renamingSessionID != nil },
+                    set: { if !$0 { renamingSessionID = nil; renameText = "" } }
+                )
+            ) {
+                TextField("Name", text: $renameText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Cancel", role: .cancel) {
+                    renamingSessionID = nil
+                    renameText = ""
+                }
+                Button("Rename") {
+                    Task { await commitRename() }
+                }
+            }
+            .alert(
+                "Session is attached elsewhere",
+                isPresented: Binding(
+                    get: { detachConfirmFor != nil },
+                    set: { if !$0 { detachConfirmFor = nil } }
+                ),
+                presenting: detachConfirmFor
+            ) { target in
+                Button("Force detach", role: .destructive) {
+                    let id = target.id
+                    detachConfirmFor = nil
+                    Task { await switchToWithForceDetach(id) }
+                }
+                Button("Attach without detaching", role: .none) {
+                    let id = target.id
+                    detachConfirmFor = nil
+                    Task { await switchTo(id) }
+                }
+                Button("Cancel", role: .cancel) {
+                    detachConfirmFor = nil
+                }
+            } message: { target in
+                Text("'\(target.name)' is attached by another client. Force-detaching gives this device the session at iPad size; attaching without detaching shares the session and forces both clients to the smaller of the two terminal sizes.")
+            }
+        }
+    }
+
+    /// Tap routing: if the user picks a session that's attached
+    /// somewhere else (i.e. not by us — we know our session via
+    /// `session.sessionID`), prompt before switching.
+    private func handleTap(_ s: TmuxSessionInfo) {
+        if s.attached, s.id != session.sessionID {
+            detachConfirmFor = s
+        } else {
+            Task { await switchTo(s.id) }
+        }
+    }
+
+    private func switchToWithForceDetach(_ sessionID: Int) async {
+        do {
+            _ = try await session.runCommand(
+                "detach-client -s $\(sessionID)\n",
+                write: { try await shell.write($0) }
+            )
+        } catch {
+            errorMessage = "detach-client failed: \(error)"
+            return
+        }
+        await switchTo(sessionID)
+    }
+
+    private func beginRename(_ s: TmuxSessionInfo) {
+        renameText = s.name
+        renamingSessionID = s.id
+    }
+
+    private func commitRename() async {
+        guard let sessionID = renamingSessionID else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamingSessionID = nil
+        renameText = ""
+        guard !trimmed.isEmpty else { return }
+        let escaped = "'" + trimmed.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        do {
+            _ = try await session.runCommand(
+                "rename-session -t $\(sessionID) \(escaped)\n",
+                write: { try await shell.write($0) }
+            )
+            await refresh()
+        } catch {
+            errorMessage = "rename failed: \(error)"
         }
     }
 
@@ -98,6 +189,16 @@ struct TmuxSessionsSheet: View {
                 Image(systemName: "checkmark")
                     .foregroundStyle(.tint)
             }
+            Button {
+                beginRename(s)
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
         }
     }
 
@@ -135,6 +236,9 @@ struct TmuxSessionsSheet: View {
 extension TmuxSessionInfo {
     /// Parse one tab-separated row from the `list-sessions` response.
     /// Format must match the `-F` argument used in `refresh()`.
+    /// `#{session_attached}` is the *count* of attached clients, so we
+    /// treat `>0` as attached (the original `== "1"` parse missed
+    /// sessions with two or more clients).
     static func parse(_ line: String) -> TmuxSessionInfo? {
         let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
         guard parts.count >= 4 else { return nil }
@@ -142,7 +246,7 @@ extension TmuxSessionInfo {
         guard rawID.first == "$", let id = Int(rawID.dropFirst()) else { return nil }
         let name = String(parts[1])
         let windowCount = Int(parts[2]) ?? 0
-        let attached = parts[3] == "1"
+        let attached = (Int(parts[3]) ?? 0) > 0
         return TmuxSessionInfo(id: id, name: name, windowCount: windowCount, attached: attached)
     }
 }

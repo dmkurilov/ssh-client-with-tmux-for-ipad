@@ -70,6 +70,13 @@ final class TmuxSession {
     @ObservationIgnored
     private var pending: PendingCommand?
 
+    /// Tail of the in-flight command chain. Each new `runCommand`
+    /// awaits the previous task's completion before claiming
+    /// `pending`, which serialises commands without exposing a
+    /// `.busy` error to callers.
+    @ObservationIgnored
+    private var lastCommandTask: Task<[String], Error>?
+
     private struct PendingCommand {
         let marker: String
         let continuation: CheckedContinuation<[String], Error>
@@ -77,7 +84,6 @@ final class TmuxSession {
     }
 
     enum CommandError: Error {
-        case busy
         case streamClosed
     }
 
@@ -119,7 +125,24 @@ final class TmuxSession {
         _ command: String,
         write: @escaping (Data) async throws -> Void
     ) async throws -> [String] {
-        guard pending == nil else { throw CommandError.busy }
+        // Wait for the previous command (if any) to finish before
+        // claiming `pending`. Failures of earlier commands don't
+        // block subsequent ones.
+        let previous = lastCommandTask
+        let task = Task<[String], Error> { [weak self] in
+            _ = try? await previous?.value
+            guard let self else { throw CommandError.streamClosed }
+            return try await self.executeCommand(command, write: write)
+        }
+        lastCommandTask = task
+        return try await task.value
+    }
+
+    @MainActor
+    private func executeCommand(
+        _ command: String,
+        write: @escaping (Data) async throws -> Void
+    ) async throws -> [String] {
         let marker = "TMUX_CMD_MARKER_\(UUID().uuidString)"
         let combined = command + "display-message -p '\(marker)'\n"
         return try await withCheckedThrowingContinuation { cont in
