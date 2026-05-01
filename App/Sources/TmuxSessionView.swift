@@ -36,6 +36,19 @@ struct TmuxSessionView: View {
     @State private var renameText: String = ""
     @State private var renamingSession = false
     @State private var sessionRenameText: String = ""
+    /// `true` if the bootstrap should run `capture-pane` for every
+    /// pane regardless of how many bytes tmux already pushed.
+    /// Set when attaching to an *existing* session — tmux sends only
+    /// a partial redraw (typically a prompt re-paint) for one pane,
+    /// so the rest of the pane content has to come from
+    /// `capture-pane`. For a *new* session, tmux replays the bash
+    /// prompt naturally; capturing on top would duplicate it.
+    @State private var captureOnBootstrap: Bool = false
+    /// Pane IDs we've already pulled scrollback for via
+    /// `capture-pane`. Bootstrap fills the active window; switching
+    /// to another tab triggers lazy capture for that window's panes
+    /// (only if they're not already in this set).
+    @State private var capturedPaneIDs: Set<Int> = []
     @State private var tabsVisible: Bool = true
     @State private var fullScreen: Bool = false
     @State private var softKeyboard: Bool = true
@@ -215,6 +228,15 @@ struct TmuxSessionView: View {
             if oldVal != nil, newVal == nil {
                 session.logDebug("dismiss() — activeWindowID went nil")
                 dismiss()
+            }
+            // Lazy capture: tmux doesn't replay scrollback to a
+            // -CC client when it switches windows, so panes in
+            // windows we haven't seen yet stay blank until a
+            // redraw is triggered (resize, split, etc). Pull the
+            // scrollback ourselves the first time each window
+            // becomes active.
+            if let newID = newVal, captureOnBootstrap {
+                Task { await captureWindowPanesIfNeeded(windowID: newID) }
             }
         }
         .onAppear {
@@ -583,6 +605,11 @@ struct TmuxSessionView: View {
                         lineWidth: isActive ? 2 : 1
                     )
             )
+            // Force a fresh mount whenever the pane id changes so
+            // SwiftUI doesn't reuse the previous tab's `TerminalView`
+            // (which was bound to the old driver). Without this,
+            // switching tabs leaves the stale pane visible.
+            .id(paneID)
         }
     }
 
@@ -870,6 +897,16 @@ struct TmuxSessionView: View {
             return
         }
         session.logDebug("attach: choice=\(choice)")
+        // Existing-session attaches need the bootstrap to run
+        // `capture-pane` for every pane, even if tmux already pushed
+        // a few bytes (a partial redraw of the active pane). New
+        // sessions don't — tmux replays the bash prompt itself, and
+        // capturing on top of that would duplicate it.
+        switch choice {
+        case .existing: captureOnBootstrap = true
+        case .new: captureOnBootstrap = false
+        }
+        capturedPaneIDs = []
         do {
             // For an attach where the user opted into force-detach,
             // boot every other client off the target session before
@@ -983,13 +1020,21 @@ struct TmuxSessionView: View {
     private func capturePane(paneID: Int) async {
         guard let shell else { return }
         guard let driver = session.driver(for: paneID) else { return }
-        // If tmux already pushed live output for this pane (e.g. a
-        // freshly-created session printing its bash prompt right
-        // after attach), the driver's buffer is non-empty and any
-        // `capture-pane` content would duplicate what's already on
-        // screen. Only capture cold panes — typical for attaching to
-        // a pre-existing session whose scrollback tmux doesn't replay.
-        guard driver.bufferedByteCount == 0 else { return }
+        // Don't capture twice — bootstrap may capture the active
+        // window's panes, and the activeWindowID watcher will try
+        // again if we don't gate it. (We *can't* fall back to a
+        // pure `bufferedByteCount == 0` check after the first
+        // capture, because the captured bytes themselves leave the
+        // driver non-empty.)
+        if capturedPaneIDs.contains(paneID) { return }
+        // For new-session attaches, only capture cold panes —
+        // tmux itself replays the bash prompt and capturing on top
+        // would duplicate it. For existing-session attaches we
+        // always capture: tmux only pushes a tiny partial redraw
+        // for the active pane (and nothing for the others), so the
+        // driver buffer being non-empty doesn't mean there's
+        // anything substantive on screen.
+        if !captureOnBootstrap, driver.bufferedByteCount > 0 { return }
         do {
             let lines = try await session.runCommand(
                 "capture-pane -p -e -S - -t %\(paneID)\n",
@@ -1004,9 +1049,23 @@ struct TmuxSessionView: View {
                 }
             }
             driver.feed(bytes)
+            capturedPaneIDs.insert(paneID)
         } catch {
             // Capture failure is harmless — the pane just stays empty
             // until new output arrives.
+        }
+    }
+
+    /// Pull scrollback for any panes in `windowID` that we haven't
+    /// captured yet. Triggered when the user switches to a tab whose
+    /// panes were never visible — tmux doesn't replay scrollback in
+    /// that situation, so the panes would otherwise be blank.
+    private func captureWindowPanesIfNeeded(windowID: Int) async {
+        guard let win = session.windows.first(where: { $0.id == windowID }),
+              let layout = win.layout
+        else { return }
+        for paneID in layout.paneIDs where !capturedPaneIDs.contains(paneID) {
+            await capturePane(paneID: paneID)
         }
     }
 

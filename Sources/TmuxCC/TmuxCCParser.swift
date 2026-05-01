@@ -90,14 +90,21 @@ public struct TmuxCCParser {
             lineBuffer.append(byte)
 
         case .inDCSAfterEsc:
-            if byte == 0x5C /* '\' */ {
-                flushLine(events: &events)
+            // Only treat `\x1b\` as the DCS terminator when it
+            // appears at the *start* of a line (i.e. the line
+            // buffer is empty). Otherwise it's content — typically
+            // an OSC hyperlink's String-Terminator embedded inside a
+            // capture-pane response. Treating it as DCS-end mid-line
+            // ate the rest of the response and the `%exit` that
+            // followed.
+            if byte == 0x5C /* '\' */, lineBuffer.isEmpty {
                 framing = .afterDCS
                 events.append(.dcsEnd)
                 return
             }
-            // Not ST — put the ESC back into the buffer and reprocess
-            // this byte as a normal in-DCS byte.
+            // Not a real ST — push the ESC back and reprocess the
+            // byte as a normal in-DCS byte (so CSI/OSC sequences
+            // survive in the content).
             lineBuffer.append(0x1B)
             framing = .inDCS
             step(byte, events: &events)
