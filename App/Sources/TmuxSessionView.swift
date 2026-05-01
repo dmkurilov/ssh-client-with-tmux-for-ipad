@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import SSHCore
 import TmuxCC
 import TerminalKit
@@ -35,6 +36,9 @@ struct TmuxSessionView: View {
     @State private var renameText: String = ""
     @State private var renamingSession = false
     @State private var sessionRenameText: String = ""
+    @State private var tabsVisible: Bool = true
+    @State private var fullScreen: Bool = false
+    @State private var softKeyboard: Bool = true
     /// `@State` on a class-type session persists across `NavigationStack`
     /// pop+push, so on a fresh appear the session may still hold the
     /// previous attach's `sessionID`. Without this flag, the next
@@ -48,17 +52,24 @@ struct TmuxSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            statusBar
-            tabStrip
-                .frame(height: 44)
-                .background(Color(.secondarySystemBackground))
-            Divider()
+            if !fullScreen {
+                statusBar
+            }
+            if tabsVisible {
+                tabStrip
+                    .frame(height: 44)
+                    .background(Color(.secondarySystemBackground))
+                Divider()
+            }
             content
             if showingDebug {
                 Divider()
                 debugOverlay
             }
         }
+        .toolbar(fullScreen ? .hidden : .visible, for: .navigationBar)
+        .statusBarHidden(fullScreen)
+        .ignoresSafeArea(.all, edges: fullScreen ? [.top, .bottom] : [])
         .background(keyboardShortcutSink)
         .navigationTitle(session.sessionName.map { "tmux: \($0)" } ?? "tmux")
         .navigationBarTitleDisplayMode(.inline)
@@ -75,6 +86,28 @@ struct TmuxSessionView: View {
                             beginRenameSession()
                         }
                     }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    tabsVisible.toggle()
+                } label: {
+                    Image(systemName: tabsVisible
+                        ? "rectangle.split.3x1.fill"
+                        : "rectangle.split.3x1")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    softKeyboard.toggle()
+                    session.logDebug("toolbar.keyboard → softKeyboard=\(softKeyboard)")
+                    if !softKeyboard {
+                        dismissKeyboard()
+                    }
+                } label: {
+                    Image(systemName: softKeyboard
+                        ? "keyboard.chevron.compact.down"
+                        : "keyboard")
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -239,6 +272,16 @@ struct TmuxSessionView: View {
                 }
             }
             .keyboardShortcut("w", modifiers: [.command, .shift])
+
+            Button("Toggle tab bar") {
+                tabsVisible.toggle()
+            }
+            .keyboardShortcut("b", modifiers: .command)
+
+            Button("Toggle full screen") {
+                fullScreen.toggle()
+            }
+            .keyboardShortcut("f", modifiers: .command)
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -429,16 +472,22 @@ struct TmuxSessionView: View {
     }
 
     private var currentPaneID: Int? {
-        // Prefer the active window's known active pane.
-        if let wid = session.activeWindowID,
-           let pane = session.windows.first(where: { $0.id == wid })?.activePaneID
-        {
+        guard let wid = session.activeWindowID,
+              let win = session.windows.first(where: { $0.id == wid })
+        else {
+            return session.paneIDs.first
+        }
+        if let pane = win.activePaneID {
             return pane
         }
-        // Fallback: show any pane that's emitted output. Covers the
-        // race where `output(paneID, …)` arrives before `windowAdd`,
-        // and the common case of a single-pane session where layout
-        // parsing isn't yet available to map panes → windows.
+        // Active window known but no `%window-pane-changed` yet —
+        // pick a pane *from this window's layout*. Earlier we fell
+        // back to `session.paneIDs.first` which could point at a
+        // pane in a different window, breaking active-pane detection
+        // (and the keyboard-bringing-up tap path along with it).
+        if let layoutPane = win.layout?.paneIDs.first {
+            return layoutPane
+        }
         return session.paneIDs.first
     }
 
@@ -494,6 +543,8 @@ struct TmuxSessionView: View {
                 SwiftTermView(
                     driver: driver,
                     scheme: settings.selectedScheme,
+                    isActive: isActive,
+                    softKeyboard: softKeyboard,
                     onInput: { data in sendInput(data, toPaneID: paneID) },
                     onSizeChange: { cols, rows in
                         // Only the active pane drives window resize;
@@ -502,13 +553,26 @@ struct TmuxSessionView: View {
                         if isActive {
                             scheduleResize(paneCols: cols, paneRows: rows, paneID: paneID)
                         }
+                    },
+                    onLog: { [session] msg in
+                        session.logDebug("[%\(paneID)] \(msg)")
                     }
                 )
                 .disabled(!isActive)
                 if !isActive {
                     Color.clear
                         .contentShape(Rectangle())
-                        .onTapGesture { selectPane(paneID) }
+                        .onTapGesture {
+                            selectPane(paneID)
+                            // Pre-emptively flip the local active
+                            // pane so the next tap doesn't hit the
+                            // overlay again — tmux sometimes
+                            // suppresses `%window-pane-changed` when
+                            // its server-side active already matches.
+                            if let wid = session.activeWindowID {
+                                session.setActivePane(paneID, in: wid)
+                            }
+                        }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -524,6 +588,20 @@ struct TmuxSessionView: View {
 
     private func selectPane(_ id: Int) {
         sendShellCommand("select-pane -t %\(id)\n")
+    }
+
+    /// Force-dismiss the soft keyboard. `UIApplication.sendAction(
+    /// resignFirstResponder)` doesn't actually unfocus SwiftTerm
+    /// (debug log showed `isFirst=true` after seven taps), so we
+    /// reach for `endEditing(true)` on the key window — that walks
+    /// the view tree and dismisses any active text-input session.
+    private func dismissKeyboard() {
+        let keyWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first(where: \.isKeyWindow)
+        let dismissed = keyWindow?.endEditing(true) ?? false
+        session.logDebug("dismissKeyboard endEditing returned \(dismissed)")
     }
 
     /// Close a window: tell tmux, then optimistically prune our local

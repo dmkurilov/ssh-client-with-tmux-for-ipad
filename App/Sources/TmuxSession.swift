@@ -42,7 +42,13 @@ final class TmuxSession {
     private var drivers: [Int: TerminalDriver] = [:]
 
     /// Most recent control-mode lines (events + outgoing commands) for
-    /// the on-screen debug log. Observed so the overlay updates live.
+    /// the on-screen debug log. NOT observed — appending used to
+    /// trigger a SwiftUI body re-evaluation, which (combined with
+    /// any `logDebug` call from inside `updateUIView`) created an
+    /// infinite render loop. The overlay reads this snapshot but
+    /// doesn't auto-refresh; callers can re-open it to see the
+    /// latest tail.
+    @ObservationIgnored
     var debugLog: [String] = []
     private static let debugLogCapacity = 30
 
@@ -91,6 +97,15 @@ final class TmuxSession {
     /// any output from that pane yet.
     func driver(for paneID: Int) -> TerminalDriver? {
         drivers[paneID]
+    }
+
+    /// Optimistically set the active pane of `windowID` without
+    /// waiting for tmux's `%window-pane-changed`. Used when the user
+    /// taps an "inactive" pane in the UI; tmux may not always reply
+    /// (if it considers the pane already active server-side), so
+    /// without this our overlay would keep stealing taps.
+    func setActivePane(_ paneID: Int, in windowID: Int) {
+        updateWindow(windowID) { $0.activePaneID = paneID }
     }
 
     /// Find which window currently owns `paneID`. Used to label
