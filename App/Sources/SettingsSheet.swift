@@ -9,6 +9,7 @@ struct SettingsSheet: View {
     let onDone: () -> Void
 
     @State private var addingKey = false
+    @State private var showingDemo = false
     @Bindable private var transcripts = TranscriptStore.shared
     @Bindable private var fileLogger = FileLogger.shared
     @Bindable private var consent = RecordingConsent.shared
@@ -63,6 +64,17 @@ struct SettingsSheet: View {
                     } label: {
                         Label("Browse debug log", systemImage: "doc.text")
                     }
+                    #if DEBUG
+                    // Full-screen cover (rather than a NavigationLink)
+                    // so the demo terminal isn't constrained by the
+                    // Settings sheet's form-sheet size on iPad — the
+                    // pane area gets the whole device.
+                    Button {
+                        showingDemo = true
+                    } label: {
+                        Label("Open demo terminal", systemImage: "rectangle.dashed")
+                    }
+                    #endif
                 } header: {
                     Text("Debug")
                 } footer: {
@@ -100,6 +112,14 @@ struct SettingsSheet: View {
                     consent.pendingPrompt = false
                 }
             }
+            #if DEBUG
+            .fullScreenCover(isPresented: $showingDemo) {
+                DemoSessionView(
+                    backend: FakeSessionBackend(echoDelay: .seconds(1), paneCount: 2),
+                    scheme: settings.selectedScheme
+                )
+            }
+            #endif
         }
     }
 
