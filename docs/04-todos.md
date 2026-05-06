@@ -4,6 +4,41 @@ Backlog of features that are clearly architecturally feasible but
 not yet built. Each entry: the idea, why we'd want it, the rough
 plan, and known open questions. Add new entries on top.
 
+## Custom slim soft-keyboard accessory bar
+
+**Idea**: replace SwiftTerm's default `TerminalAccessory` (now nil'd
+in `GatedTerminalView`) with a slim accessory bar matching
+`docs/05-ui-vision.md` §4.1 — `Esc`, `Tab`, `Ctrl`, arrow cluster,
+`|`, one-tap tmux prefix (default `Ctrl-B`).
+
+**Why**: SwiftTerm's accessory had Esc/Tab/Ctrl + a redundant F1–F10
+row that pushed the QWERTY area off-screen on iPad. We removed it
+to fix that, but touch-only users now have no shortcut buttons for
+common terminal keys (Esc for vim, Ctrl for shells, prefix for tmux).
+
+**Rough plan**:
+
+1. Build a `TerminalAccessoryBar` UIView (or SwiftUI hosted) with the
+   keys above. Each button calls back into the active pane's input
+   stream via the existing `onInput` closure on `SwiftTermView`.
+2. Set `GatedTerminalView.inputAccessoryView` to return this view
+   instead of nil. Wire it up so the bar gets the active pane's
+   handler.
+3. Per `docs/05-ui-vision.md` §4.1: no F-keys by default, opt-in if
+   a user wants them. Skip them entirely for v1.
+4. Hide button on the bar dismisses keyboard per the keyboard-mode
+   contract (see `project_decision_keyboard_modes`).
+
+**Open questions**:
+
+- Hosting model — UIView with auto-layout or a SwiftUI `UIHostingController`?
+  SwiftUI is cleaner if we can size it correctly via `intrinsicContentSize`.
+- Tmux prefix is configurable per the spec — surface in Settings,
+  or default `Ctrl-B` and add custom-prefix later?
+- Should the bar adapt to `KeyboardMode.forcedHidden` (hide along with
+  keyboard) or stay visible as a "shortcuts strip" even with keyboard
+  hidden? Probably hide-with-keyboard for v1 simplicity.
+
 ## Hardware-keyboard-aware soft keyboard suppression
 
 **Idea**: detect whether a HW keyboard is attached and use that to

@@ -4,27 +4,94 @@ import Observation
 /// One window's worth of state as the UI sees it. Identifiers map
 /// onto tmux's `@<id>` and `%<id>` for the real backend; the fake
 /// uses synthetic small ints with the same shape.
+/// Recursive split tree describing a window's pane layout. Each
+/// leaf is a single pane; each split groups children with a
+/// direction. `splitting(target:direction:newID:)` is the canonical
+/// way to add a pane: it replaces the matched leaf with a 2-child
+/// split, leaving siblings untouched. That gives the iTerm2-style
+/// "split this pane into two halves" behaviour.
+indirect enum PaneNode: Equatable {
+    case leaf(paneID: Int)
+    case split(direction: SplitDirection, children: [PaneNode])
+
+    /// Flat list of every pane id in this subtree, in render order.
+    var allPaneIDs: [Int] {
+        switch self {
+        case .leaf(let pid): return [pid]
+        case .split(_, let kids): return kids.flatMap { $0.allPaneIDs }
+        }
+    }
+
+    /// Replace the leaf for `target` with a 2-child split containing
+    /// the original target plus a new leaf for `newID`. No-op if
+    /// `target` isn't in the tree.
+    func splitting(target: Int, direction: SplitDirection, newID: Int) -> PaneNode {
+        switch self {
+        case .leaf(let pid):
+            if pid == target {
+                return .split(
+                    direction: direction,
+                    children: [.leaf(paneID: target), .leaf(paneID: newID)]
+                )
+            }
+            return self
+        case .split(let dir, let kids):
+            return .split(
+                direction: dir,
+                children: kids.map {
+                    $0.splitting(target: target, direction: direction, newID: newID)
+                }
+            )
+        }
+    }
+
+    /// Remove a pane. Returns the pruned tree, or `nil` when the
+    /// removal would leave the tree empty (caller drops the window).
+    /// Splits with one remaining child collapse to that child so
+    /// trees don't grow degenerate over time.
+    func removingPane(_ id: Int) -> PaneNode? {
+        switch self {
+        case .leaf(let pid):
+            return pid == id ? nil : self
+        case .split(let dir, let kids):
+            let pruned = kids.compactMap { $0.removingPane(id) }
+            if pruned.isEmpty { return nil }
+            if pruned.count == 1 { return pruned[0] }
+            return .split(direction: dir, children: pruned)
+        }
+    }
+}
+
 struct WindowInfo: Identifiable, Equatable {
     let id: Int
     var name: String?
-    var paneIDs: [Int]
+    var layout: PaneNode
     var activePaneID: Int?
 
-    init(id: Int, name: String? = nil, paneIDs: [Int] = [], activePaneID: Int? = nil) {
+    /// Flat list of pane ids in this window's tree. Read-only —
+    /// mutate via `layout`.
+    var paneIDs: [Int] { layout.allPaneIDs }
+
+    init(id: Int, name: String? = nil, layout: PaneNode, activePaneID: Int? = nil) {
         self.id = id
         self.name = name
-        self.paneIDs = paneIDs
+        self.layout = layout
         self.activePaneID = activePaneID
     }
 }
 
-/// Direction for `splitPane`. tmux speaks `-h` (horizontal split,
-/// panes side by side) and `-v` (vertical split, panes stacked);
-/// we mirror that vocabulary here.
-enum SplitDirection {
-    /// Side by side. tmux `-h`.
+/// Direction for `splitPane`. Mirrors tmux's flag vocabulary:
+/// `.horizontal` = tmux `-h` = vertical *divider* between panes
+/// (panes laid out **side by side**); `.vertical` = tmux `-v` =
+/// horizontal *divider* (panes **stacked**). The case name refers
+/// to the orientation of the *split motion*, which is opposite to
+/// the iTerm2 menu vocabulary ("Split Vertically" = side-by-side,
+/// = our `.horizontal`). User-facing labels in `DemoSessionView`
+/// follow iTerm2.
+enum SplitDirection: Equatable {
+    /// Side by side, vertical divider. tmux `-h`.
     case horizontal
-    /// Stacked. tmux `-v`.
+    /// Stacked, horizontal divider. tmux `-v`.
     case vertical
 }
 
@@ -46,6 +113,10 @@ final class SessionState {
     /// `true` once the underlying transport has handed us at least
     /// one window. Views gate "session ready" UI on this.
     var isAttached: Bool = false
+    /// When non-nil, this single pane should fill the tab area —
+    /// other panes in the same window stay alive but aren't drawn.
+    /// Mirrors tmux's `resize-pane -Z` zoom flag.
+    var zoomedPaneID: Int?
 
     /// Convenience: the currently-active window, or `nil` if none.
     var activeWindow: WindowInfo? {

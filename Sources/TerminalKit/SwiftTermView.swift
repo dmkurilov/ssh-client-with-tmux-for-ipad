@@ -5,98 +5,167 @@ import SwiftTerm
 import UIKit
 import ColorSchemes
 
-/// `TerminalView` subclass that gates first-responder status on a
-/// caller-driven flag. Toggling the flag off makes the view refuse
-/// to become first responder, so the soft keyboard goes away and
-/// stays away — until the user toggles back on.
+/// Plain `UIView` that owns the active pane's first responder
+/// **without** being a `UIKeyInput`. iPadOS reserves a fair amount
+/// of bottom-edge chrome (HW-keyboard hint pill, accessory dock,
+/// home-indicator safe area) for any first responder that conforms
+/// to `UIKeyInput`. By holding FR on a plain `UIResponder` and
+/// keeping `SwiftTerm.TerminalView` as a render-only child, iPadOS
+/// stops drawing that chrome — the screen runs edge-to-edge.
 ///
-/// Side-effect: hardware-keyboard input is also gated (HW keys only
-/// route to a first responder). The trade-off matches the user's
-/// mental model: keyboard shows ↔ I can type; keyboard hidden ↔ no
-/// typing until I tap the toolbar button again.
-/// `TerminalView` subclass that decouples *first responder* (HW key
-/// routing) from *soft keyboard visibility*. We always accept first
-/// responder so `pressesBegan` reaches SwiftTerm; the soft keyboard
-/// is suppressed by installing an empty `inputView` when the user
-/// toggles it off. SwiftTerm stores `inputView` in `_inputView`, so
-/// `self.inputView = …` actually takes effect.
-final class GatedTerminalView: SwiftTerm.TerminalView {
-    /// `true`  → default keyboard chain (system soft keyboard).
-    /// `false` → an empty zero-frame inputView replaces the system
-    ///           keyboard, while first responder is preserved so
-    ///           hardware keys still work.
-    var softKeyboardEnabled: Bool = true {
-        didSet {
-            guard softKeyboardEnabled != oldValue else { return }
-            if softKeyboardEnabled {
-                self.inputView = nil
-                if let saved = savedAccessoryView {
-                    self.inputAccessoryView = saved
-                    savedAccessoryView = nil
-                }
-            } else {
-                self.inputView = UIView(frame: .zero)
-                // Stash SwiftTerm's `TerminalAccessory` so we can
-                // restore the same instance later — the alternative
-                // is leaving the strip visible at the bottom of the
-                // screen, which the user reads as "keyboard still
-                // here".
-                if savedAccessoryView == nil {
-                    savedAccessoryView = self.inputAccessoryView
-                }
-                self.inputAccessoryView = nil
-            }
-            if isFirstResponder {
-                reloadInputViews()
-            }
-        }
+/// Hardware keys arrive via `pressesBegan(_:with:)` and are
+/// translated to terminal bytes in `encodeKey`. SwiftTerm's own
+/// input pipeline is bypassed entirely (it never becomes FR, so
+/// its `UIKeyInput` machinery is dormant). The same `onInput`
+/// callback that SwiftTerm used to fire is now driven by us
+/// directly.
+///
+/// Software keys are NOT solved here — see Phase 2 (`SoftKeyboard`),
+/// which renders our own keyboard as a SwiftUI sibling and feeds
+/// bytes through the same `onInput` path.
+/// Thin `SwiftTerm.TerminalView` subclass that refuses to become
+/// first responder. Critical: the stock class *does* become FR on
+/// touch (via its UIKeyInput chain), and when it does iPadOS sees
+/// a UIKeyInput FR holder and draws the system shortcut bar (the
+/// `esc / ctrl / F1–F8 / arrows / icons` strip). Refusing FR keeps
+/// the chrome away — `TerminalHost` (a plain UIResponder) is the
+/// only FR holder in this hierarchy.
+final class RenderOnlyTerminalView: SwiftTerm.TerminalView {
+    override var canBecomeFirstResponder: Bool { false }
+}
+
+final class TerminalHost: UIView {
+    let terminalView: RenderOnlyTerminalView
+    var onInput: ((Data) -> Void)?
+    var log: ((String) -> Void)?
+
+    override init(frame: CGRect) {
+        terminalView = RenderOnlyTerminalView(frame: frame)
+        super.init(frame: frame)
+        addSubview(terminalView)
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            terminalView.topAnchor.constraint(equalTo: topAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
     }
 
-    private var savedAccessoryView: UIView?
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) not supported")
+    }
 
     override var canBecomeFirstResponder: Bool { true }
 
-    /// Auto-claim first responder once we're in a window, so HW
-    /// keystrokes (and the soft keyboard, if enabled) work without
-    /// the caller having to explicitly tap.
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil, !isFirstResponder {
             _ = becomeFirstResponder()
         }
     }
+
+    // MARK: - Hardware key handling
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var unhandled: Set<UIPress> = []
+        for press in presses {
+            if let bytes = press.key.flatMap(encodeKey) {
+                onInput?(Data(bytes))
+                log?("HW key → \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "))")
+            } else {
+                unhandled.insert(press)
+            }
+        }
+        if !unhandled.isEmpty {
+            super.pressesBegan(unhandled, with: event)
+        }
+    }
+
+    /// Translate a `UIKey` into raw terminal bytes. Returns `nil`
+    /// for keys we don't (yet) handle — the caller passes those up
+    /// the responder chain so menu shortcuts (`⌘D`, `⌘W`, etc.)
+    /// still work.
+    ///
+    /// Coverage today is "the basics" — enough to type ASCII, run
+    /// vim, navigate a shell. Composed input (IME), dead keys, and
+    /// most function-key behaviors land in Phase 2 alongside the
+    /// custom soft keyboard.
+    private func encodeKey(_ key: UIKey) -> [UInt8]? {
+        let mods = key.modifierFlags
+        // Cmd-modified keys belong to menus / `.keyboardShortcut`.
+        // Don't intercept; let the responder chain dispatch.
+        if mods.contains(.command) { return nil }
+
+        // Named keys take precedence over `characters` because
+        // some of them (Esc, Tab, arrows) have no useful character.
+        switch key.keyCode {
+        case .keyboardEscape:                     return [0x1B]
+        case .keyboardTab:                        return [0x09]
+        case .keyboardReturnOrEnter,
+             .keypadEnter:                        return [0x0D]
+        case .keyboardDeleteOrBackspace:          return [0x7F]
+        case .keyboardLeftArrow:                  return [0x1B, 0x5B, 0x44]
+        case .keyboardRightArrow:                 return [0x1B, 0x5B, 0x43]
+        case .keyboardUpArrow:                    return [0x1B, 0x5B, 0x41]
+        case .keyboardDownArrow:                  return [0x1B, 0x5B, 0x42]
+        case .keyboardHome:                       return [0x1B, 0x5B, 0x48]
+        case .keyboardEnd:                        return [0x1B, 0x5B, 0x46]
+        case .keyboardPageUp:                     return [0x1B, 0x5B, 0x35, 0x7E]
+        case .keyboardPageDown:                   return [0x1B, 0x5B, 0x36, 0x7E]
+        default: break
+        }
+
+        // Ctrl+<letter> → control byte (Ctrl-A = 0x01, …, Ctrl-Z = 0x1A).
+        // Use `charactersIgnoringModifiers` so caps-shift doesn't matter.
+        if mods.contains(.control),
+           let scalar = key.charactersIgnoringModifiers.lowercased().unicodeScalars.first,
+           (0x61...0x7A).contains(scalar.value)
+        {
+            return [UInt8(scalar.value & 0x1F)]
+        }
+
+        // Alt/Option+<key> → ESC <key> (xterm "meta" mode).
+        if mods.contains(.alternate), let scalar = key.characters.unicodeScalars.first {
+            return [0x1B, UInt8(scalar.value & 0x7F)]
+        }
+
+        // Plain printable.
+        if !key.characters.isEmpty {
+            return Array(key.characters.utf8)
+        }
+        return nil
+    }
 }
 
-/// SwiftUI wrapper around SwiftTerm's iOS `TerminalView`. Provides
-/// real ANSI rendering, colors, scroll-back, and keyboard input
-/// capture. Bytes flow:
-///   - **In**: caller pushes via `TerminalDriver.feed(_:)`.
-///   - **Out**: user keystrokes arrive via `onInput` callback (raw
-///     bytes ready to send over SSH or wherever).
+/// SwiftUI wrapper that vends a `TerminalHost`. The host's child
+/// `SwiftTerm.TerminalView` does the rendering; the host owns FR
+/// and HW-key handling. The flow:
+///   - **In**: caller pushes via `TerminalDriver.feed(_:)`. The
+///     driver eventually binds to the inner SwiftTerm view once it
+///     has a real size.
+///   - **Out (HW)**: `TerminalHost.pressesBegan` → `encodeKey` →
+///     `onInput`.
+///   - **Out (SW)**: solved separately by Phase 2's custom
+///     keyboard, which calls `onInput` directly.
 ///   - **Resize**: SwiftTerm reports `(cols, rows)` via
-///     `onSizeChange`; the caller is responsible for forwarding
-///     these to whatever PTY backs the session.
+///     `onSizeChange`; the caller forwards to whatever PTY backs
+///     the session.
 public struct SwiftTermView: UIViewRepresentable {
     let driver: TerminalDriver
     let scheme: ColorSchemes.ColorScheme?
     let isActive: Bool
-    /// Caller-driven flag: should the soft keyboard be shown for the
-    /// active pane right now? We don't auto-claim on tap, so this is
-    /// the only way the keyboard appears — typically toggled by the
-    /// keyboard button in `TmuxSessionView`'s toolbar.
-    let softKeyboard: Bool
     let onInput: (Data) -> Void
     let onSizeChange: (Int, Int) -> Void
     /// Optional debug logger — wired through to the App's
-    /// `FileLogger` so `becomeFirstResponder` / `resignFirstResponder`
-    /// behaviour shows up in `debug.log`.
+    /// `FileLogger` so FR transitions and HW-key traffic show up
+    /// in `debug.log`.
     let onLog: ((String) -> Void)?
 
     public init(
         driver: TerminalDriver,
         scheme: ColorSchemes.ColorScheme? = nil,
         isActive: Bool = true,
-        softKeyboard: Bool = false,
         onInput: @escaping (Data) -> Void,
         onSizeChange: @escaping (Int, Int) -> Void = { _, _ in },
         onLog: ((String) -> Void)? = nil
@@ -104,50 +173,47 @@ public struct SwiftTermView: UIViewRepresentable {
         self.driver = driver
         self.scheme = scheme
         self.isActive = isActive
-        self.softKeyboard = softKeyboard
         self.onInput = onInput
         self.onSizeChange = onSizeChange
         self.onLog = onLog
     }
 
-    public func makeUIView(context: Context) -> SwiftTerm.TerminalView {
-        let view = GatedTerminalView()
-        view.terminalDelegate = context.coordinator
+    // The associated `UIViewType` is `UIView` — an erasure that
+    // keeps `TerminalHost` package-internal. SwiftUI accepts the
+    // concrete subclass at runtime; we downcast in `updateUIView`.
+    public func makeUIView(context: Context) -> UIView {
+        let host = TerminalHost(frame: .zero)
+        host.terminalView.terminalDelegate = context.coordinator
+        host.onInput = onInput
+        host.log = onLog
         context.coordinator.log = onLog
         if let scheme {
-            ColorSchemeApply.apply(scheme, to: view)
+            ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
-        view.softKeyboardEnabled = softKeyboard
-        // We *don't* bind here. SwiftTerm computes cols/rows from its
-        // frame, and at makeUIView time the frame can still be zero
-        // (especially in nested SwiftUI like GeometryReader inside a
-        // split layout). Binding too early would replay buffered
-        // bytes against a 0/2-column terminal — they'd hard-wrap one
-        // char per line. Instead the coordinator binds the first
-        // time `sizeChanged` reports a real width.
-        return view
+        // We *don't* bind the driver here. SwiftTerm computes
+        // cols/rows from its frame, and at makeUIView time the
+        // frame can still be zero (especially in nested SwiftUI
+        // like GeometryReader inside a split layout). The
+        // coordinator binds the first time `sizeChanged` reports a
+        // real width.
+        return host
     }
 
-    public func updateUIView(_ uiView: SwiftTerm.TerminalView, context: Context) {
-        // Re-apply the scheme on update so changing it from a
-        // settings sheet recolors live terminals without remounting.
+    public func updateUIView(_ uiView: UIView, context: Context) {
+        guard let host = uiView as? TerminalHost else { return }
         if let scheme {
-            ColorSchemeApply.apply(scheme, to: uiView)
+            ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
-        // Soft-keyboard visibility is independent of first responder.
-        // The active pane is always FR (so HW keys work); whether the
-        // soft keyboard pops up is governed by `inputView` on the
-        // gated view.
-        if let gated = uiView as? GatedTerminalView {
-            gated.softKeyboardEnabled = softKeyboard
-        }
+        host.onInput = onInput
+        host.log = onLog
+        context.coordinator.log = onLog
         context.coordinator.wantsKeyboard = isActive
-        if isActive, !uiView.isFirstResponder {
-            let ok = uiView.becomeFirstResponder()
-            onLog?("STV → becomeFirstResponder() ok=\(ok) isFirst=\(uiView.isFirstResponder)")
-        } else if !isActive, uiView.isFirstResponder {
-            let ok = uiView.resignFirstResponder()
-            onLog?("STV → resignFirstResponder() ok=\(ok) isFirst=\(uiView.isFirstResponder)")
+        if isActive, !host.isFirstResponder {
+            let ok = host.becomeFirstResponder()
+            onLog?("Host → becomeFirstResponder() ok=\(ok) isFirst=\(host.isFirstResponder)")
+        } else if !isActive, host.isFirstResponder {
+            let ok = host.resignFirstResponder()
+            onLog?("Host → resignFirstResponder() ok=\(ok) isFirst=\(host.isFirstResponder)")
         }
     }
 
@@ -161,9 +227,9 @@ public struct SwiftTermView: UIViewRepresentable {
         let onSizeChange: (Int, Int) -> Void
         private var hasBound = false
         var log: ((String) -> Void)?
-        /// Mirror of the parent's `softKeyboard` so `sizeChanged`
-        /// (which fires once the view has a real size, i.e. is in
-        /// the window hierarchy) can perform the initial claim.
+        /// Mirror of the parent's `isActive` so `sizeChanged` (which
+        /// fires once the view has a real size, i.e. is in the window
+        /// hierarchy) can perform the initial first-responder claim.
         var wantsKeyboard: Bool = false
 
         init(
@@ -176,10 +242,16 @@ public struct SwiftTermView: UIViewRepresentable {
             self.onSizeChange = onSizeChange
         }
 
-        // MARK: - TerminalViewDelegate (required & commonly-required)
+        // MARK: - TerminalViewDelegate
 
+        /// SwiftTerm normally calls this when *its* `UIKeyInput` chain
+        /// receives a key. With `TerminalHost` as FR, SwiftTerm is
+        /// never FR, so this is mostly dormant — but we still wire
+        /// it to `onInput` as a safety net for any internal SwiftTerm
+        /// path that might fire it (paste handling, accessibility,
+        /// etc.).
         public func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
-            log?("STV.send \(data.count) bytes")
+            log?("STV.send \(data.count) bytes (unexpected — host should own FR)")
             onInput(Data(data))
         }
 
@@ -192,20 +264,6 @@ public struct SwiftTermView: UIViewRepresentable {
             if !hasBound, newCols >= 10, newRows >= 3 {
                 MainActor.assumeIsolated {
                     driver.bind(source)
-                    // The view now has real cell dimensions and is
-                    // in the window hierarchy — safe to claim first
-                    // responder if the parent asked for it. Doing
-                    // this in `updateUIView` was racing the view's
-                    // attachment and the becomeFirstResponder call
-                    // returned `false` silently.
-                    // `wantsKeyboard` here means "active pane wants
-                    // first-responder" — the soft-keyboard flag has
-                    // already been pushed into `softKeyboardEnabled`
-                    // by `updateUIView`.
-                    if wantsKeyboard, !source.isFirstResponder {
-                        let ok = source.becomeFirstResponder()
-                        log?("STV.sizeChanged → becomeFirstResponder() ok=\(ok) isFirst=\(source.isFirstResponder)")
-                    }
                 }
                 hasBound = true
             }

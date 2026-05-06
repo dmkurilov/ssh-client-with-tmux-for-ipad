@@ -51,7 +51,10 @@ struct TmuxSessionView: View {
     @State private var capturedPaneIDs: Set<Int> = []
     @State private var tabsVisible: Bool = true
     @State private var fullScreen: Bool = false
-    @State private var softKeyboard: Bool = true
+    /// Whether the slim accessory bar (Esc/Tab/arrows/`|`/prefix)
+    /// is shown above the keyboard. Independent of soft-keyboard
+    /// visibility — iPadOS owns that based on FR + HW state.
+    @State private var specialKeys: Bool = true
     /// `@State` on a class-type session persists across `NavigationStack`
     /// pop+push, so on a fresh appear the session may still hold the
     /// previous attach's `sessionID`. Without this flag, the next
@@ -75,6 +78,11 @@ struct TmuxSessionView: View {
                 Divider()
             }
             content
+            if specialKeys, let pid = currentPaneID {
+                AccessoryBar(onKey: { data in
+                    sendInput(data, toPaneID: pid)
+                })
+            }
             if showingDebug {
                 Divider()
                 debugOverlay
@@ -111,15 +119,12 @@ struct TmuxSessionView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    softKeyboard.toggle()
-                    session.logDebug("toolbar.keyboard → softKeyboard=\(softKeyboard)")
-                    if !softKeyboard {
-                        dismissKeyboard()
-                    }
+                    specialKeys.toggle()
+                    session.logDebug("toolbar.specialKeys → \(specialKeys)")
                 } label: {
-                    Image(systemName: softKeyboard
-                        ? "keyboard.chevron.compact.down"
-                        : "keyboard")
+                    Image(systemName: specialKeys
+                        ? "keyboard"
+                        : "keyboard.chevron.compact.down")
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -566,7 +571,6 @@ struct TmuxSessionView: View {
                     driver: driver,
                     scheme: settings.selectedScheme,
                     isActive: isActive,
-                    softKeyboard: softKeyboard,
                     onInput: { data in sendInput(data, toPaneID: paneID) },
                     onSizeChange: { cols, rows in
                         // Only the active pane drives window resize;
@@ -615,20 +619,6 @@ struct TmuxSessionView: View {
 
     private func selectPane(_ id: Int) {
         sendShellCommand("select-pane -t %\(id)\n")
-    }
-
-    /// Force-dismiss the soft keyboard. `UIApplication.sendAction(
-    /// resignFirstResponder)` doesn't actually unfocus SwiftTerm
-    /// (debug log showed `isFirst=true` after seven taps), so we
-    /// reach for `endEditing(true)` on the key window — that walks
-    /// the view tree and dismisses any active text-input session.
-    private func dismissKeyboard() {
-        let keyWindow = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first(where: \.isKeyWindow)
-        let dismissed = keyWindow?.endEditing(true) ?? false
-        session.logDebug("dismissKeyboard endEditing returned \(dismissed)")
     }
 
     /// Close a window: tell tmux, then optimistically prune our local

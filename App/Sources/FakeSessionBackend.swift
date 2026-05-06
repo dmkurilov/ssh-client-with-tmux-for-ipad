@@ -20,20 +20,30 @@ final class FakeSessionBackend: SessionBackend {
     private let echoDelay: Duration
 
     /// Build a fake with one window of `paneCount` echo panes.
-    /// The first pane is active.
+    /// The first pane is active. Initial panes are arranged
+    /// side-by-side at the root.
     init(echoDelay: Duration = .seconds(1), paneCount: Int = 2) {
         self.echoDelay = echoDelay
         self.nextPaneID = 1
         self.nextWindowID = 1
         FileLogger.shared.log("FakeSession init delay=\(echoDelay) paneCount=\(paneCount)")
-        let initialPaneIDs = (0..<paneCount).map { _ in newPaneID() }
+        let initialPaneIDs = (0..<max(paneCount, 1)).map { _ in newPaneID() }
         for pid in initialPaneIDs {
             panes[pid] = EchoPaneBackend(id: pid, echoDelay: echoDelay)
+        }
+        let layout: PaneNode
+        if initialPaneIDs.count == 1 {
+            layout = .leaf(paneID: initialPaneIDs[0])
+        } else {
+            layout = .split(
+                direction: .horizontal,
+                children: initialPaneIDs.map { .leaf(paneID: $0) }
+            )
         }
         let win = WindowInfo(
             id: newWindowID(),
             name: "demo",
-            paneIDs: initialPaneIDs,
+            layout: layout,
             activePaneID: initialPaneIDs.first
         )
         state.sessionName = "demo"
@@ -65,16 +75,10 @@ final class FakeSessionBackend: SessionBackend {
         let newPID = newPaneID()
         panes[newPID] = EchoPaneBackend(id: newPID, echoDelay: echoDelay)
         var win = state.windows[widx]
-        // Insert just after the target so the layout reflects the
-        // intended adjacency. Direction is logged but not yet used
-        // to model a split tree — the demo view lays panes out
-        // horizontally regardless. Real `TmuxSessionBackend` will
-        // honour the direction.
-        if let idx = win.paneIDs.firstIndex(of: target) {
-            win.paneIDs.insert(newPID, at: idx + 1)
-        } else {
-            win.paneIDs.append(newPID)
-        }
+        // The leaf for `target` becomes a 2-child split containing
+        // the original target plus the new pane — leaves siblings
+        // alone. iTerm2-style nesting falls out of repeated splits.
+        win.layout = win.layout.splitting(target: target, direction: direction, newID: newPID)
         win.activePaneID = newPID
         state.windows[widx] = win
         FileLogger.shared.log("FakeSession.splitPane \(direction) target=%\(target) → new=%\(newPID)")
@@ -83,16 +87,25 @@ final class FakeSessionBackend: SessionBackend {
     func killPane(_ paneID: Int) async {
         FileLogger.shared.log("FakeSession.killPane %\(paneID)")
         panes.removeValue(forKey: paneID)
-        for i in state.windows.indices {
-            state.windows[i].paneIDs.removeAll { $0 == paneID }
-            if state.windows[i].activePaneID == paneID {
-                state.windows[i].activePaneID = state.windows[i].paneIDs.first
+        // Walk windows in reverse so removing one doesn't shift
+        // earlier indices we haven't visited yet.
+        for i in state.windows.indices.reversed() where state.windows[i].paneIDs.contains(paneID) {
+            var w = state.windows[i]
+            if let pruned = w.layout.removingPane(paneID) {
+                w.layout = pruned
+                if w.activePaneID == paneID {
+                    w.activePaneID = pruned.allPaneIDs.first
+                }
+                state.windows[i] = w
+            } else {
+                state.windows.remove(at: i)
             }
         }
-        // A window with no panes is gone in tmux too — drop it.
-        state.windows.removeAll { $0.paneIDs.isEmpty }
         if !state.windows.contains(where: { $0.id == state.activeWindowID }) {
             state.activeWindowID = state.windows.first?.id
+        }
+        if state.zoomedPaneID == paneID {
+            state.zoomedPaneID = nil
         }
     }
 
@@ -107,7 +120,12 @@ final class FakeSessionBackend: SessionBackend {
         let pid = newPaneID()
         panes[pid] = EchoPaneBackend(id: pid, echoDelay: echoDelay)
         let wid = newWindowID()
-        let win = WindowInfo(id: wid, name: nil, paneIDs: [pid], activePaneID: pid)
+        let win = WindowInfo(
+            id: wid,
+            name: nil,
+            layout: .leaf(paneID: pid),
+            activePaneID: pid
+        )
         state.windows.append(win)
         state.activeWindowID = wid
         FileLogger.shared.log("FakeSession.newWindow → @\(wid) pane=%\(pid)")
@@ -141,6 +159,68 @@ final class FakeSessionBackend: SessionBackend {
     func renameSession(_ newName: String) async {
         FileLogger.shared.log("FakeSession.renameSession → \(newName)")
         state.sessionName = newName
+    }
+
+    func toggleZoom(paneID: Int) async {
+        // Only zoom panes that exist. Toggling on the same pane
+        // un-zooms; toggling on a different pane swaps the zoom
+        // target — matches tmux's behaviour where `resize-pane -Z`
+        // is per-window-active.
+        guard panes[paneID] != nil else { return }
+        if state.zoomedPaneID == paneID {
+            state.zoomedPaneID = nil
+        } else {
+            state.zoomedPaneID = paneID
+        }
+        FileLogger.shared.log(
+            "FakeSession.toggleZoom %\(paneID) → \(state.zoomedPaneID.map { "%\($0)" } ?? "off")"
+        )
+    }
+
+    func movePane(paneID: Int, toWindow windowID: Int) async {
+        FileLogger.shared.log("FakeSession.movePane %\(paneID) → @\(windowID)")
+        // Validate both endpoints exist and are different.
+        guard state.windows.contains(where: { $0.paneIDs.contains(paneID) }),
+              state.windows.contains(where: { $0.id == windowID }),
+              !(state.windows.first { $0.id == windowID }?.paneIDs.contains(paneID) ?? false)
+        else { return }
+
+        // 1. Remove from the source window. If that empties the
+        //    window, drop it — tmux does the same.
+        for i in state.windows.indices.reversed() where state.windows[i].paneIDs.contains(paneID) {
+            var w = state.windows[i]
+            if let pruned = w.layout.removingPane(paneID) {
+                w.layout = pruned
+                if !pruned.allPaneIDs.contains(w.activePaneID ?? -1) {
+                    w.activePaneID = pruned.allPaneIDs.first
+                }
+                state.windows[i] = w
+            } else {
+                FileLogger.shared.log("FakeSession.movePane: pruned empty window @\(w.id)")
+                state.windows.remove(at: i)
+            }
+            break
+        }
+
+        // 2. Re-find the destination — its index may have shifted
+        //    if a source window was removed before it.
+        guard let dstIdx = state.windows.firstIndex(where: { $0.id == windowID }) else { return }
+        var dst = state.windows[dstIdx]
+        // Append the moved pane on the right at the root. A future
+        // version could let the user pick the drop position; for the
+        // demo, "drop on tab" = "add to that tab's right edge."
+        dst.layout = .split(
+            direction: .horizontal,
+            children: [dst.layout, .leaf(paneID: paneID)]
+        )
+        dst.activePaneID = paneID
+        state.windows[dstIdx] = dst
+        state.activeWindowID = windowID
+
+        // tmux clears the zoom flag on layout-changing operations.
+        if state.zoomedPaneID == paneID {
+            state.zoomedPaneID = nil
+        }
     }
 
     // MARK: - ID minting

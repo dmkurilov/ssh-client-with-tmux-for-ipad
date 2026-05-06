@@ -147,46 +147,62 @@ CWD detection:
 
 ## 4. Keyboard
 
-### 4.1 Software keyboard layout
+The keyboard model went through a couple of iterations and ended
+up as a single-axis toggle. iPadOS owns soft-keyboard visibility
+based on first responder + HW keyboard state; the app only owns
+**whether the slim accessory bar is shown.**
+
+### 4.1 Soft keyboard
+
+iPadOS draws the SW keyboard whenever a text-input view holds
+first responder *and* no HW keyboard is connected. We don't try
+to override either side of that — earlier attempts at "force
+hide" or "force show" via `inputView` tricks produced grey strips,
+stranded accessory containers, and modes that contradicted iPadOS
+policy. So:
+
+- Active pane = first responder.
+- iPadOS shows / hides SW keyboard automatically.
+- HW keyboard connected → iPadOS suppresses SW; small "show
+  keyboard" hint pill at the bottom (system chrome, irreducible).
+
+### 4.2 Slim accessory bar
+
+A custom `TerminalAccessoryBar` (in `TerminalKit`) replaces
+SwiftTerm's stock `TerminalAccessory`. Buttons send raw bytes
+through the same `onInput` path as natural keystrokes:
 
 ```
-[ special keys ]                                  [ hide ]
-[ standard iOS keyboard                                  ]
+[ esc | tab | ← | ↑ | ↓ | → | | | ⌃B ]
 ```
 
-Special keys row: `Esc`, `Tab`, `Ctrl`, arrow cluster, `|`, one-tap
-tmux prefix (default `Ctrl-B`). No F-keys by default; opt-in.
+No F-keys (deliberately — they pushed QWERTY off-screen on iPad).
+A configurable tmux prefix, sticky-Ctrl modifier, and opt-in
+F-keys are future TODOs.
 
-### 4.2 Showing the keyboard
+The bar is shown above the SW keyboard, or docked alone at the
+bottom if HW is connected and SW isn't drawing.
 
-**Single-finger taps in a pane never show the keyboard.** This is
-deliberate — accidental taps during scroll or selection in other
-SSH clients ruin the gesture; we don't want that.
+### 4.3 `kb` toolbar button
 
-Routes to show:
+A single binary toggle: **special keys on / off**. Drives
+`SwiftTermView.specialKeys` → `GatedTerminalView.specialKeysEnabled`
+→ `inputAccessoryView` flips between the bar and `nil`.
 
-- `kb` toolbar button (mode picker).
-- Auto mode + no HW keyboard → keyboard appears automatically.
+### 4.4 What never shows the keyboard
 
-Long-press is reserved for selection.
+- **Single-finger taps in a pane.** Single tap is for selection
+  and pane-focus only; bringing up the keyboard via accidental
+  scroll-taps is the bug we're explicitly avoiding.
+- **Long-press in a pane.** Reserved for selection.
 
-### 4.3 `kb` modes
+The only ways the SW keyboard appears are: iPadOS deciding to
+show it (FR held, no HW), or the user explicitly invoking it via
+iPadOS's hint pill when HW is connected.
 
-Three modes; user picks via the `kb` button:
-
-- **Auto** (default)
-  - HW present → SW always hidden.
-  - HW absent → SW shown by default. Tapping the keyboard's hide
-    button flips the effective state to hidden for the rest of
-    this session attach. To re-show, tap `kb` and switch to
-    *Forcefully shown*.
-- **Forcefully hidden** — SW hidden regardless of HW. Hide button
-  is a no-op.
-- **Forcefully shown** — SW shown regardless of HW. Hide button
-  dismisses the keyboard one-shot; the mode itself doesn't change.
-
-HW detection: `GCKeyboard.coalescedKeyboard` from the
-`GameController` framework (see `04-todos.md`).
+HW detection: `GCKeyboard.coalesced` from the `GameController`
+framework. Currently informational only — used for future status
+UI; doesn't drive any keyboard policy.
 
 ## 5. Hotkeys
 

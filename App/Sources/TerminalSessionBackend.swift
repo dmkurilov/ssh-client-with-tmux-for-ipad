@@ -55,6 +55,17 @@ protocol SessionBackend: AnyObject {
     func killWindow(_ windowID: Int) async
     func renameWindow(_ windowID: Int, name: String) async
     func renameSession(_ newName: String) async
+
+    /// Toggle zoom on a pane (tmux `resize-pane -Z`). When zoomed,
+    /// only this pane renders; the others stay alive but hidden.
+    /// SSH mode is a no-op.
+    func toggleZoom(paneID: Int) async
+
+    /// Move a pane between windows. Drag-to-tab in the UI calls
+    /// this. Drop on `+` (new tab) is a separate verb the view
+    /// composes from `newWindow()` + `movePane(...)` once the new
+    /// window's id arrives.
+    func movePane(paneID: Int, toWindow windowID: Int) async
 }
 
 /// No-op default implementations so backends only override what
@@ -69,4 +80,6 @@ extension SessionBackend {
     func killWindow(_ windowID: Int) async {}
     func renameWindow(_ windowID: Int, name: String) async {}
     func renameSession(_ newName: String) async {}
+    func toggleZoom(paneID: Int) async {}
+    func movePane(paneID: Int, toWindow windowID: Int) async {}
 }
