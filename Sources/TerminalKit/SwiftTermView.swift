@@ -39,6 +39,28 @@ final class TerminalHost: UIView {
     var onInput: ((Data) -> Void)?
     var log: ((String) -> Void)?
 
+    /// Whether this host should currently own first responder.
+    /// The SwiftUI wrapper sets this from `isActive` in both
+    /// `makeUIView` and `updateUIView`. The `didSet` flips FR
+    /// atomically, which keeps "which pane gets keystrokes"
+    /// in lockstep with "which pane is active" — without it,
+    /// each host's `didMoveToWindow` unconditionally claimed
+    /// FR, the last one mounted won (typically the wrong pane),
+    /// and typing went to the inactive pane on first mount.
+    var isActivePane: Bool = false {
+        didSet {
+            guard isActivePane != oldValue else { return }
+            // Outside a window, FR changes are no-ops; the next
+            // `didMoveToWindow` will use the value we set here.
+            guard window != nil else { return }
+            if isActivePane, !isFirstResponder {
+                _ = becomeFirstResponder()
+            } else if !isActivePane, isFirstResponder {
+                _ = resignFirstResponder()
+            }
+        }
+    }
+
     override init(frame: CGRect) {
         terminalView = RenderOnlyTerminalView(frame: frame)
         super.init(frame: frame)
@@ -60,7 +82,15 @@ final class TerminalHost: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil, !isFirstResponder {
+        if window == nil {
+            if isFirstResponder {
+                _ = resignFirstResponder()
+            }
+            return
+        }
+        // Only claim if this is the active pane. The inactive pane's
+        // host stays passive on mount.
+        if isActivePane, !isFirstResponder {
             _ = becomeFirstResponder()
         }
     }
@@ -186,6 +216,7 @@ public struct SwiftTermView: UIViewRepresentable {
         host.terminalView.terminalDelegate = context.coordinator
         host.onInput = onInput
         host.log = onLog
+        host.isActivePane = isActive
         context.coordinator.log = onLog
         if let scheme {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
@@ -208,13 +239,11 @@ public struct SwiftTermView: UIViewRepresentable {
         host.log = onLog
         context.coordinator.log = onLog
         context.coordinator.wantsKeyboard = isActive
-        if isActive, !host.isFirstResponder {
-            let ok = host.becomeFirstResponder()
-            onLog?("Host → becomeFirstResponder() ok=\(ok) isFirst=\(host.isFirstResponder)")
-        } else if !isActive, host.isFirstResponder {
-            let ok = host.resignFirstResponder()
-            onLog?("Host → resignFirstResponder() ok=\(ok) isFirst=\(host.isFirstResponder)")
-        }
+        // FR is driven by `isActivePane`'s didSet — assigning here
+        // flips first responder atomically to whichever pane is
+        // newly active, in a single hop, without a window of "no
+        // FR" or "two FR claims racing" between mount events.
+        host.isActivePane = isActive
     }
 
     public func makeCoordinator() -> Coordinator {

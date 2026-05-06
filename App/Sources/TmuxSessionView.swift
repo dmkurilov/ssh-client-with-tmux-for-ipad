@@ -79,7 +79,7 @@ struct TmuxSessionView: View {
             }
             content
             if specialKeys, let pid = currentPaneID {
-                AccessoryBar(onKey: { data in
+                SoftKeyboard(onKey: { data in
                     sendInput(data, toPaneID: pid)
                 })
             }

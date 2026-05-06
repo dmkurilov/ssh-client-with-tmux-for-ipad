@@ -4,76 +4,50 @@ Backlog of features that are clearly architecturally feasible but
 not yet built. Each entry: the idea, why we'd want it, the rough
 plan, and known open questions. Add new entries on top.
 
-## Custom slim soft-keyboard accessory bar
+## SoftKeyboard v2 — symbols page, Ctrl modifier, F-keys, shifted digits
 
-**Idea**: replace SwiftTerm's default `TerminalAccessory` (now nil'd
-in `GatedTerminalView`) with a slim accessory bar matching
-`docs/05-ui-vision.md` §4.1 — `Esc`, `Tab`, `Ctrl`, arrow cluster,
-`|`, one-tap tmux prefix (default `Ctrl-B`).
+**Idea**: extend `App/Sources/SoftKeyboard.swift` (v1 shipped) with
+the missing iOS-keyboard-equivalent surface area:
 
-**Why**: SwiftTerm's accessory had Esc/Tab/Ctrl + a redundant F1–F10
-row that pushed the QWERTY area off-screen on iPad. We removed it
-to fix that, but touch-only users now have no shortcut buttons for
-common terminal keys (Esc for vim, Ctrl for shells, prefix for tmux).
+- **Symbols page** (`123` / `#+=` toggle): `! @ # $ % ^ & * ( )`,
+  `[ ] { } < > = + ` ` ~`, etc. Mirrors iOS's standard 3-page
+  layout.
+- **Sticky `Ctrl` modifier**: tap `ctrl` to arm; next letter is
+  `Ctrl-letter` (0x01–0x1A); state clears after one keystroke.
+- **F-keys row**: `F1–F12` as an opt-in row (Settings toggle —
+  default off). Sends `ESC O P` / `ESC O Q` etc.
+- **Shifted number row**: when `⇧` is on, digits become `! @ #
+  $ % ^ & * ( )`.
 
-**Rough plan**:
-
-1. Build a `TerminalAccessoryBar` UIView (or SwiftUI hosted) with the
-   keys above. Each button calls back into the active pane's input
-   stream via the existing `onInput` closure on `SwiftTermView`.
-2. Set `GatedTerminalView.inputAccessoryView` to return this view
-   instead of nil. Wire it up so the bar gets the active pane's
-   handler.
-3. Per `docs/05-ui-vision.md` §4.1: no F-keys by default, opt-in if
-   a user wants them. Skip them entirely for v1.
-4. Hide button on the bar dismisses keyboard per the keyboard-mode
-   contract (see `project_decision_keyboard_modes`).
-
-**Open questions**:
-
-- Hosting model — UIView with auto-layout or a SwiftUI `UIHostingController`?
-  SwiftUI is cleaner if we can size it correctly via `intrinsicContentSize`.
-- Tmux prefix is configurable per the spec — surface in Settings,
-  or default `Ctrl-B` and add custom-prefix later?
-- Should the bar adapt to `KeyboardMode.forcedHidden` (hide along with
-  keyboard) or stay visible as a "shortcuts strip" even with keyboard
-  hidden? Probably hide-with-keyboard for v1 simplicity.
-
-## Hardware-keyboard-aware soft keyboard suppression
-
-**Idea**: detect whether a HW keyboard is attached and use that to
-gate the soft-keyboard toolbar button and the default `softKeyboard`
-state. HW attached → no need for the toolbar control, and soft
-keyboard should default to off. HW detached → restore the current
-behavior (default on, toolbar visible).
-
-**Why**: Magic Keyboard / Smart Keyboard Folio users currently see a
-keyboard-toggle button they don't need, and have to tap it once to
-hide the soft keyboard that pops up over their typing. Auto-detect
-removes a manual step.
+**Why**: v1 covers basic typing (lowercase letters, digits, common
+punctuation, Enter, Backspace, arrows, prefix). To match iOS
+keyboard input parity for general terminal use we need the
+remaining symbols and modifiers. Power users running shells, vim,
+git all need easy access to `{`, `}`, `\`, `~`, etc.
 
 **Rough plan**:
 
-1. Add a small `HardwareKeyboardObserver` (`@Observable`) backed by
-   `GCKeyboard.coalescedKeyboard` from `GameController.framework`.
-   Subscribe to `.GCKeyboardDidConnect` / `.GCKeyboardDidDisconnect`
-   to keep `isAttached: Bool` current.
-2. In `TmuxSessionView`: change `softKeyboard` default to follow
-   `!observer.isAttached` on first appear; flip on disconnect events.
-3. Hide the soft-keyboard toolbar button when `observer.isAttached`
-   is `true` (or replace it with a small "HW" indicator).
-4. Keep manual override: if the user explicitly toggles after
-   attach/detach, respect their last choice for the rest of the
-   session.
+1. Add a `Page` enum (`qwerty`, `numbers`, `symbols`) with a `123`
+   / `#+=` button cycling through.
+2. Layout each page via the same row helpers; reuse `keyButton`
+   for non-letter rows.
+3. Add `ctrlArmed` `@State`. When set, `letterButton` sends
+   `(ascii & 0x1F)` instead of plain. Arms once, clears on use.
+4. F-keys: gated behind a Settings toggle. Render as a 7th row
+   when enabled.
+5. Numeric shift: when `shifted` on `digitRow`, swap the labels and
+   bytes for the `! @ # $ % ^ & * ( )` set.
 
 **Open questions**:
 
-- Does iPadOS Simulator report HW keyboard correctly via `GCKeyboard`?
-  Need to verify or document the workaround.
-- Edge case: user docks/undocks Magic Keyboard mid-session — confirm
-  the notification fires reliably.
-- Should the override be remembered across sessions, or is "session
-  scope" the right granularity?
+- Tmux prefix is hard-coded to `Ctrl-B` in v1. Surface in Settings
+  before or after this work? Same memory entry as binary upload's
+  prefix discussion.
+- F-keys: opt-in is friendlier; opt-out adds clutter. Keep as
+  Settings toggle.
+- Caps-lock state: `⇪` indicator currently only changes the shift
+  glyph. Could persist across page changes — already does, since
+  `shifted` / `capsLocked` are independent of `Page`. ✓
 
 ## Match remote terminal size on attach (font auto-fit)
 

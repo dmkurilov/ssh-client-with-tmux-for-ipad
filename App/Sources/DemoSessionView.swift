@@ -28,10 +28,11 @@ struct DemoSessionView: View {
     @State private var fullScreen: Bool = false
     @State private var tabsVisible: Bool = true
     /// One-axis toggle for the slim accessory bar (Esc/Tab/arrows
-    /// /`|`/prefix). The SW keyboard itself is owned by iPadOS
-    /// based on FR + HW state — we no longer try to override it
-    /// from the app side.
-    @State private var specialKeysVisible: Bool = true
+    /// /`|`/prefix). Defaults to *off when a HW keyboard is
+    /// attached* (the user has Esc/Tab/etc. on real keys already)
+    /// and *on otherwise*. User can flip via the `kb` toolbar
+    /// button.
+    @State private var specialKeysVisible: Bool = !HardwareKeyboardObserver.shared.isAttached
 
     @State private var renamingWindowID: Int?
     @State private var renameText: String = ""
@@ -49,10 +50,10 @@ struct DemoSessionView: View {
     /// confirmation-dialog action sheet below.
     @State private var actionTab: WindowInfo?
 
-    // `HardwareKeyboardObserver.shared` is still around for future
-    // status-indicator UI, but the keyboard refactor no longer
-    // needs to read HW state — iPadOS owns SW keyboard visibility
-    // and we just toggle our own accessory bar on top.
+    // `HardwareKeyboardObserver.shared` informs the initial
+    // `specialKeysVisible` default. After mount, the user owns the
+    // toggle; we don't auto-flip on connect/disconnect to avoid
+    // pulling the bar out from under them mid-session.
 
     /// Color for the 1pt strip between adjacent panes. Contrasts
     /// with the *terminal* color scheme (not iOS light/dark): a
@@ -83,7 +84,7 @@ struct DemoSessionView: View {
                 }
                 paneArea
                 if specialKeysVisible {
-                    AccessoryBar(onKey: { data in
+                    SoftKeyboard(onKey: { data in
                         if let pid = backend.state.activePaneID,
                            let pane = backend.pane(pid)
                         {

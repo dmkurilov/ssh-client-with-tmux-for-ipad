@@ -34,7 +34,12 @@ final class EchoPaneBackend: PaneBackend {
 
     func send(_ data: Data) async {
         FileLogger.shared.log("EchoPane[%\(id)].send \(data.count)B")
-        let echoed = data
+        // Translate CR → CRLF on echo. Enter sends `0x0D`; in a
+        // real shell, line discipline (or the shell itself) echoes
+        // back `\r\n` so the cursor advances to the next line.
+        // Without this, hitting Enter just returns the cursor to
+        // the start of the same line.
+        let echoed = Self.expandCarriageReturns(data)
         let id = self.id
         let delay = echoDelay
         let task = Task { [weak self] in
@@ -44,6 +49,19 @@ final class EchoPaneBackend: PaneBackend {
             FileLogger.shared.log("EchoPane[%\(id)].echo \(echoed.count)B")
         }
         pendingTasks.append(task)
+    }
+
+    private static func expandCarriageReturns(_ data: Data) -> Data {
+        guard data.contains(0x0D) else { return data }
+        var out = Data()
+        out.reserveCapacity(data.count + 1)
+        for byte in data {
+            out.append(byte)
+            if byte == 0x0D {
+                out.append(0x0A)
+            }
+        }
+        return out
     }
 
     func resize(cols: Int, rows: Int) async {
