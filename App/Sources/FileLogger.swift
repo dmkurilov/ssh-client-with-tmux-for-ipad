@@ -41,14 +41,6 @@ final class FileLogger {
         writeLine("[\(formatter.string(from: Date()))] \(message)\n")
     }
 
-    /// Bypass the `enabled` toggle. Reserved for diagnostics where
-    /// we need evidence even when the user hasn't (yet) flipped the
-    /// switch — e.g. proving a hotkey actually fires. Use sparingly;
-    /// the toggle exists for a reason (privacy of pane content).
-    func forceLog(_ message: String) {
-        writeLine("[\(formatter.string(from: Date()))] [FORCE] \(message)\n")
-    }
-
     private func writeLine(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
         if FileManager.default.fileExists(atPath: url.path) {

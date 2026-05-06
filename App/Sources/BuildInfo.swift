@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-06 — nav-blink-v12 + isolate-SwiftTerm"
+    static let signature = "2026-05-06 — nav-shipped (post-cleanup)"
 }

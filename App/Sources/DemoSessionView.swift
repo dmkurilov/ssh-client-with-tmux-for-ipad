@@ -555,11 +555,7 @@ struct DemoSessionView: View {
                             navigatePane(Self.mapDirection(dir))
                         },
                         onLog: { msg in
-                            // forceLog so HW-key tracing reaches the
-                            // file even when the user hasn't toggled
-                            // logging on. Diagnostic for the
-                            // ⌘⌥+arrow nav investigation.
-                            FileLogger.shared.forceLog("Demo[%\(paneID)] \(msg)")
+                            FileLogger.shared.log("Demo[%\(paneID)] \(msg)")
                         }
                     )
                     .disabled(!isActive)
@@ -843,36 +839,19 @@ struct DemoSessionView: View {
     }
 
     private func navigatePane(_ direction: PaneNavigationDirection) {
-        // Uses `forceLog` (bypasses the `Write debug log` toggle)
-        // so a fresh install with logging off still produces
-        // diagnostic evidence. Pure diagnostic — remove once nav
-        // is verified end-to-end.
-        let activePID = backend.state.activePaneID
-        let winID = backend.state.activeWindowID
-        let msg0 = "Demo navigatePane(\(direction)) activePane=\(activePID.map { "%\($0)" } ?? "nil") activeWin=\(winID.map { "@\($0)" } ?? "nil")"
-        FileLogger.shared.forceLog(msg0)
-        print("[Demo] " + msg0)
-
-        guard let pid = activePID,
+        guard let pid = backend.state.activePaneID,
               let win = backend.state.activeWindow
-        else {
-            FileLogger.shared.forceLog("Demo navigatePane bail — no active pane/window")
-            return
-        }
-        let next = win.layout.neighbor(of: pid, direction: direction)
-        let msg1 = "Demo neighbor(of: %\(pid), \(direction)) = \(next.map { "%\($0)" } ?? "nil")"
-        FileLogger.shared.forceLog(msg1)
-        print("[Demo] " + msg1)
-
-        if let next {
+        else { return }
+        if let next = win.layout.neighbor(of: pid, direction: direction) {
             Task { await backend.selectPane(next) }
+            FileLogger.shared.log("⌘⌥\(direction) %\(pid) → %\(next)")
         } else {
+            // No neighbor — flash for 200ms as feedback.
             paneNavBlink = true
-            FileLogger.shared.forceLog("Demo paneNavBlink = true (no neighbor)")
+            FileLogger.shared.log("⌘⌥\(direction) %\(pid) — no neighbor (blink)")
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(200))
                 paneNavBlink = false
-                FileLogger.shared.forceLog("Demo paneNavBlink = false (timer)")
             }
         }
     }

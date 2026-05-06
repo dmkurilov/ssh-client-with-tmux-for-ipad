@@ -127,16 +127,6 @@ final class TerminalHost: UIView {
     /// runs at first responder before SwiftUI gets a look.
     override var keyCommands: [UIKeyCommand]? {
         return [
-            // Diagnostic: a benign chord nothing else uses. If `⌘0`
-            // logs but `⌘⌥+arrow` doesn't, the macOS host that
-            // runs the Simulator (Stage Manager / Mission Control)
-            // is consuming the arrow chord before iPadOS sees it.
-            // Real-iPad behavior would differ.
-            UIKeyCommand(
-                action: #selector(handleDiagnosticZero),
-                input: "0",
-                modifierFlags: [.command]
-            ),
             UIKeyCommand(
                 action: #selector(handleNavLeft),
                 input: UIKeyCommand.inputLeftArrow,
@@ -160,29 +150,10 @@ final class TerminalHost: UIView {
         ]
     }
 
-    @objc private func handleDiagnosticZero() {
-        log?("UIKeyCommand ⌘0 fired (diagnostic)")
-    }
-
-    @objc private func handleNavLeft() {
-        log?("UIKeyCommand ⌘⌥← fired")
-        onNavigatePane?(.left)
-    }
-
-    @objc private func handleNavRight() {
-        log?("UIKeyCommand ⌘⌥→ fired")
-        onNavigatePane?(.right)
-    }
-
-    @objc private func handleNavUp() {
-        log?("UIKeyCommand ⌘⌥↑ fired")
-        onNavigatePane?(.up)
-    }
-
-    @objc private func handleNavDown() {
-        log?("UIKeyCommand ⌘⌥↓ fired")
-        onNavigatePane?(.down)
-    }
+    @objc private func handleNavLeft()  { onNavigatePane?(.left) }
+    @objc private func handleNavRight() { onNavigatePane?(.right) }
+    @objc private func handleNavUp()    { onNavigatePane?(.up) }
+    @objc private func handleNavDown()  { onNavigatePane?(.down) }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -204,18 +175,8 @@ final class TerminalHost: UIView {
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var unhandled: Set<UIPress> = []
         for press in presses {
-            // Diagnostic: log every key, including modifier-driven
-            // ones we deliberately let bubble. Helps tell whether
-            // SwiftUI `.keyboardShortcut` routing is broken (key
-            // arrives here but the SwiftUI button never fires) vs
-            // the system intercepting the chord upstream.
-            if let key = press.key {
-                let mods = key.modifierFlags
-                log?("pressesBegan keyCode=\(key.keyCode.rawValue) mods=\(mods.rawValue) chars='\(key.characters)'")
-            }
             if let bytes = press.key.flatMap(encodeKey) {
                 onInput?(Data(bytes))
-                log?("HW key → \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "))")
             } else {
                 unhandled.insert(press)
             }
