@@ -63,6 +63,11 @@ struct TmuxSessionView: View {
     /// zeroes `activeWindowID` and pops the view.
     @State private var hasObservedInitialSessionID = false
 
+    /// While `true`, render the active pane as inactive — used as
+    /// a 200ms feedback flash when `⌘⌥+arrow` hits a wall. Doesn't
+    /// touch tmux state; only the local rendering layer dims.
+    @State private var paneNavBlink: Bool = false
+
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
 
@@ -309,6 +314,34 @@ struct TmuxSessionView: View {
                 fullScreen.toggle()
             }
             .keyboardShortcut("f", modifiers: .command)
+
+            // ⌘1..⌘9 → switch to tab N (1-based). Out-of-range
+            // shortcuts no-op rather than wrapping.
+            ForEach(1...9, id: \.self) { idx in
+                Button("Switch to tab \(idx)") {
+                    let windows = session.windows
+                    guard idx - 1 < windows.count else {
+                        session.logDebug("⌘\(idx) — no tab")
+                        return
+                    }
+                    let target = windows[idx - 1].id
+                    sendShellCommand("select-window -t :@\(target)\n")
+                    session.logDebug("⌘\(idx) → @\(target)")
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
+            }
+
+            // ⌘⌥+arrow → spatial pane navigation. Uses tmux's own
+            // cell-grid coordinates from `%layout-change` so the
+            // neighbor pick is exact, not estimated.
+            Button("Pane right") { navigatePane(.right) }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            Button("Pane left")  { navigatePane(.left) }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            Button("Pane up")    { navigatePane(.up) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button("Pane down")  { navigatePane(.down) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -496,6 +529,19 @@ struct TmuxSessionView: View {
                     .padding(8)
             }
         }
+        // Visible "can't go there" feedback for `⌘⌥+arrow` hitting
+        // a wall: dim AND red-wash the pane region for 200ms.
+        .opacity(paneNavBlink ? 0.3 : 1.0)
+        .overlay {
+            if paneNavBlink {
+                Color.red.opacity(0.18)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.08), value: paneNavBlink)
+        .onChange(of: paneNavBlink) { old, new in
+            session.logDebug("paneNavBlink \(old) → \(new)")
+        }
     }
 
     private var currentPaneID: Int? {
@@ -528,9 +574,12 @@ struct TmuxSessionView: View {
     /// of the layout (cols for horizontal, rows for vertical) so a
     /// 60/40 split actually looks 60/40, not 50/50.
     private func paneTree(_ layout: TmuxLayout) -> AnyView {
+        // `paneNavBlink` overrides the displayed active pane to nil
+        // for 200ms — visual feedback for failed `⌘⌥+arrow` nav.
+        let displayedActive: Int? = paneNavBlink ? nil : currentPaneID
         switch layout.node {
         case .leaf(let paneID):
-            return AnyView(paneCell(paneID: paneID, isActive: paneID == currentPaneID))
+            return AnyView(paneCell(paneID: paneID, isActive: paneID == displayedActive))
 
         case .horizontal(let kids):
             let total = max(kids.reduce(0) { $0 + $1.cols }, 1)
@@ -579,6 +628,17 @@ struct TmuxSessionView: View {
                         if isActive {
                             scheduleResize(paneCols: cols, paneRows: rows, paneID: paneID)
                         }
+                    },
+                    onNavigatePane: { dir in
+                        let mapped: PaneNavigationDirection = {
+                            switch dir {
+                            case .left:  return .left
+                            case .right: return .right
+                            case .up:    return .up
+                            case .down:  return .down
+                            }
+                        }()
+                        navigatePane(mapped)
                     },
                     onLog: { [session] msg in
                         session.logDebug("[%\(paneID)] \(msg)")
@@ -668,6 +728,137 @@ struct TmuxSessionView: View {
     /// master shell (i.e. the tmux client itself, not a pane). This is
     /// how every tmux verb in `-CC` mode is invoked — `select-window`,
     /// `split-window`, `kill-pane`, etc.
+    /// Spatial pane navigation: walk the active window's
+    /// `TmuxLayout`, find the neighbor leaf in `direction`, send
+    /// `select-pane -t %<id>` to tmux. tmux gives us exact
+    /// cell-grid coordinates per leaf so the geometry is accurate
+    /// without estimation.
+    ///
+    /// On a no-neighbor result (the user tried to walk past the
+    /// edge of the layout), flash `paneNavBlink` for 200ms — the
+    /// active pane briefly dims so the user sees we tried but
+    /// can't go that way.
+    private func navigatePane(_ direction: PaneNavigationDirection) {
+        let layout = currentWindow?.layout
+        let active = currentPaneID
+        let msg0 = "navigatePane(\(direction)) — activePane=\(active.map { "%\($0)" } ?? "nil") layout=\(layout != nil ? "yes" : "nil")"
+        session.logDebug(msg0)
+        print("[Tmux] " + msg0)
+
+        guard let layout, let active else {
+            print("[Tmux] navigatePane bail — no layout/active")
+            return
+        }
+        let next = neighborPane(of: active, in: layout, direction: direction)
+        let msg1 = "neighbor(of: %\(active), \(direction)) = \(next.map { "%\($0)" } ?? "nil")"
+        session.logDebug(msg1)
+        print("[Tmux] " + msg1)
+
+        if let next {
+            sendShellCommand("select-pane -t %\(next)\n")
+        } else {
+            paneNavBlink = true
+            session.logDebug("⌘⌥\(direction) — no neighbor (blink set)")
+            print("[Tmux] paneNavBlink = true")
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(200))
+                paneNavBlink = false
+                print("[Tmux] paneNavBlink = false")
+            }
+        }
+    }
+
+    private func neighborPane(
+        of paneID: Int,
+        in layout: TmuxLayout,
+        direction: PaneNavigationDirection
+    ) -> Int? {
+        let leaves = collectLeaves(layout)
+        guard let cur = leaves.first(where: { $0.id == paneID }) else { return nil }
+        let past = leaves.filter { l in
+            l.id != paneID && Self.isPastLeaf(l, current: cur, direction: direction)
+        }
+        let overlapping = past.filter {
+            Self.leafHasPerpendicularOverlap($0, current: cur, direction: direction)
+        }
+        let pool = overlapping.isEmpty ? past : overlapping
+        return pool.min { lhs, rhs in
+            let lhsDir = Self.leafDirectionDistance(lhs, current: cur, direction: direction)
+            let rhsDir = Self.leafDirectionDistance(rhs, current: cur, direction: direction)
+            if lhsDir != rhsDir { return lhsDir < rhsDir }
+            let lhsPerp = Self.leafPerpendicularCenterDistance(lhs, current: cur, direction: direction)
+            let rhsPerp = Self.leafPerpendicularCenterDistance(rhs, current: cur, direction: direction)
+            return lhsPerp < rhsPerp
+        }?.id
+    }
+
+    private func collectLeaves(
+        _ layout: TmuxLayout
+    ) -> [(id: Int, x: Int, y: Int, cols: Int, rows: Int)] {
+        switch layout.node {
+        case .leaf(let id):
+            return [(id, layout.x, layout.y, layout.cols, layout.rows)]
+        case .horizontal(let kids), .vertical(let kids):
+            return kids.flatMap { collectLeaves($0) }
+        }
+    }
+
+    private static func isPastLeaf(
+        _ candidate: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        current: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        direction: PaneNavigationDirection
+    ) -> Bool {
+        switch direction {
+        case .right: return candidate.x >= current.x + current.cols
+        case .left:  return candidate.x + candidate.cols <= current.x
+        case .up:    return candidate.y + candidate.rows <= current.y
+        case .down:  return candidate.y >= current.y + current.rows
+        }
+    }
+
+    private static func leafHasPerpendicularOverlap(
+        _ candidate: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        current: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        direction: PaneNavigationDirection
+    ) -> Bool {
+        switch direction {
+        case .left, .right:
+            let maxStart = max(candidate.y, current.y)
+            let minEnd = min(candidate.y + candidate.rows, current.y + current.rows)
+            return maxStart < minEnd
+        case .up, .down:
+            let maxStart = max(candidate.x, current.x)
+            let minEnd = min(candidate.x + candidate.cols, current.x + current.cols)
+            return maxStart < minEnd
+        }
+    }
+
+    private static func leafDirectionDistance(
+        _ candidate: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        current: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        direction: PaneNavigationDirection
+    ) -> Int {
+        switch direction {
+        case .right: return candidate.x - (current.x + current.cols)
+        case .left:  return current.x - (candidate.x + candidate.cols)
+        case .up:    return current.y - (candidate.y + candidate.rows)
+        case .down:  return candidate.y - (current.y + current.rows)
+        }
+    }
+
+    private static func leafPerpendicularCenterDistance(
+        _ candidate: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        current: (id: Int, x: Int, y: Int, cols: Int, rows: Int),
+        direction: PaneNavigationDirection
+    ) -> Int {
+        switch direction {
+        case .left, .right:
+            return abs((candidate.y + candidate.rows / 2) - (current.y + current.rows / 2))
+        case .up, .down:
+            return abs((candidate.x + candidate.cols / 2) - (current.x + current.cols / 2))
+        }
+    }
+
     private func sendShellCommand(_ cmd: String) {
         session.logDebug("send: \(cmd.trimmingCharacters(in: .newlines))")
         guard let shell else {

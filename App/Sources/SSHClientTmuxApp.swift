@@ -3,15 +3,13 @@ import SwiftUI
 @main
 struct SSHClientTmuxApp: App {
     init() {
-        // Touch the HW-keyboard observer at app launch so its
-        // `GCKeyboard.coalesced` lookup runs early and the
-        // `GCKeyboardDidConnect` notification has time to fire
-        // before any view reads `isAttached` for an initial
-        // default. Without this, the very first open of the
-        // demo terminal saw `isAttached == false` even with HW
-        // connected, because GameController hadn't yet dispatched
-        // the connect event for the singleton's lazy init.
         _ = HardwareKeyboardObserver.shared
+        // forceLog: writes regardless of toggle (diagnostic only).
+        FileLogger.shared.forceLog("App launched, build=\(BuildInfo.signature)")
+        // Regular log: writes only when consent / toggle is on, so
+        // the user sees the build-version in their normal logs and
+        // can match a debug.log to a specific build.
+        FileLogger.shared.log("Build: \(BuildInfo.signature)")
     }
 
     var body: some Scene {

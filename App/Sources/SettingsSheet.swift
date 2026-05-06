@@ -96,6 +96,20 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("Off by default. When enabled, raw pane output is appended to `Documents/transcripts/` per pane. Files contain ANSI escape sequences — terminal output may include secrets. Shares the consent timer with the debug log.")
                 }
+
+                Section {
+                    HStack {
+                        Text("Build")
+                        Spacer()
+                        Text(BuildInfo.signature)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                } footer: {
+                    Text("Hand-bumped tag in `App/Sources/BuildInfo.swift`. Compare with the value in your working repo to confirm a code change is on the device.")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

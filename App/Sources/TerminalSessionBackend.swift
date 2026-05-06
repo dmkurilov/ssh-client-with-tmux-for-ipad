@@ -66,6 +66,14 @@ protocol SessionBackend: AnyObject {
     /// composes from `newWindow()` + `movePane(...)` once the new
     /// window's id arrives.
     func movePane(paneID: Int, toWindow windowID: Int) async
+
+    /// Display title for a pane — typically the foreground command
+    /// plus whatever extra status the backend chooses to surface
+    /// (e.g. tmux's `pane_title` and `pane_current_command`, or an
+    /// `mc [user@host]: ~/path` synthesis). Returns `nil` if the
+    /// backend has nothing useful to offer; the view falls back to
+    /// `%<id>`.
+    func paneTitle(_ paneID: Int) -> String?
 }
 
 /// No-op default implementations so backends only override what
@@ -82,4 +90,5 @@ extension SessionBackend {
     func renameSession(_ newName: String) async {}
     func toggleZoom(paneID: Int) async {}
     func movePane(paneID: Int, toWindow windowID: Int) async {}
+    func paneTitle(_ paneID: Int) -> String? { nil }
 }

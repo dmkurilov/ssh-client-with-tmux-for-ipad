@@ -1,5 +1,11 @@
 import Foundation
 import Observation
+import CoreGraphics
+
+/// Direction for spatial pane navigation (`⌘⌥+arrow`).
+enum PaneNavigationDirection {
+    case left, right, up, down
+}
 
 /// One window's worth of state as the UI sees it. Identifiers map
 /// onto tmux's `@<id>` and `%<id>` for the real backend; the fake
@@ -58,6 +64,124 @@ indirect enum PaneNode: Equatable {
             if pruned.isEmpty { return nil }
             if pruned.count == 1 { return pruned[0] }
             return .split(direction: dir, children: pruned)
+        }
+    }
+
+    /// Spatial neighbor of `paneID` in `direction`. Returns `nil` if
+    /// the pane sits at the edge in that direction (caller no-ops)
+    /// or the id isn't in the tree.
+    ///
+    /// Scoring follows iTerm2-style layered preference:
+    /// 1. Filter candidates that lie *strictly past* the current
+    ///    pane's edge in the requested direction.
+    /// 2. Prefer candidates that overlap the current pane in the
+    ///    perpendicular axis (i.e. for `.right`, share Y range).
+    ///    If any do, drop the rest — diagonal picks are noisy.
+    /// 3. Among the remaining pool, pick the one with the smallest
+    ///    direction-aligned distance (gap between edges along the
+    ///    motion axis). Ties break on perpendicular-axis center
+    ///    distance — the closer perpendicularly aligned pane wins.
+    func neighbor(of paneID: Int, direction: PaneNavigationDirection) -> Int? {
+        let rects = paneRects()
+        guard let cur = rects.first(where: { $0.id == paneID })?.frame else { return nil }
+        let past = rects.filter { entry in
+            entry.id != paneID && Self.isPast(entry.frame, current: cur, direction: direction)
+        }
+        let overlapping = past.filter {
+            Self.hasPerpendicularOverlap($0.frame, current: cur, direction: direction)
+        }
+        let pool = overlapping.isEmpty ? past : overlapping
+        return pool.min { lhs, rhs in
+            let lhsDir = Self.directionDistance(lhs.frame, current: cur, direction: direction)
+            let rhsDir = Self.directionDistance(rhs.frame, current: cur, direction: direction)
+            if lhsDir != rhsDir { return lhsDir < rhsDir }
+            let lhsPerp = Self.perpendicularCenterDistance(lhs.frame, current: cur, direction: direction)
+            let rhsPerp = Self.perpendicularCenterDistance(rhs.frame, current: cur, direction: direction)
+            return lhsPerp < rhsPerp
+        }?.id
+    }
+
+    private func paneRects(in frame: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1))
+        -> [(id: Int, frame: CGRect)]
+    {
+        switch self {
+        case .leaf(let pid):
+            return [(pid, frame)]
+        case .split(let dir, let kids):
+            let count = CGFloat(kids.count)
+            return kids.enumerated().flatMap { (i, kid) -> [(id: Int, frame: CGRect)] in
+                let kidFrame: CGRect
+                switch dir {
+                case .horizontal:
+                    let unit = frame.width / count
+                    kidFrame = CGRect(
+                        x: frame.minX + unit * CGFloat(i),
+                        y: frame.minY,
+                        width: unit,
+                        height: frame.height
+                    )
+                case .vertical:
+                    let unit = frame.height / count
+                    kidFrame = CGRect(
+                        x: frame.minX,
+                        y: frame.minY + unit * CGFloat(i),
+                        width: frame.width,
+                        height: unit
+                    )
+                }
+                return kid.paneRects(in: kidFrame)
+            }
+        }
+    }
+
+    private static func isPast(
+        _ candidate: CGRect,
+        current: CGRect,
+        direction: PaneNavigationDirection
+    ) -> Bool {
+        let eps: CGFloat = 1e-6
+        switch direction {
+        case .right: return candidate.minX >= current.maxX - eps
+        case .left:  return candidate.maxX <= current.minX + eps
+        case .up:    return candidate.maxY <= current.minY + eps
+        case .down:  return candidate.minY >= current.maxY - eps
+        }
+    }
+
+    private static func hasPerpendicularOverlap(
+        _ candidate: CGRect,
+        current: CGRect,
+        direction: PaneNavigationDirection
+    ) -> Bool {
+        switch direction {
+        case .left, .right:
+            return max(candidate.minY, current.minY) < min(candidate.maxY, current.maxY)
+        case .up, .down:
+            return max(candidate.minX, current.minX) < min(candidate.maxX, current.maxX)
+        }
+    }
+
+    private static func directionDistance(
+        _ candidate: CGRect,
+        current: CGRect,
+        direction: PaneNavigationDirection
+    ) -> CGFloat {
+        switch direction {
+        case .right: return candidate.minX - current.maxX
+        case .left:  return current.minX - candidate.maxX
+        case .up:    return current.minY - candidate.maxY
+        case .down:  return candidate.minY - current.maxY
+        }
+    }
+
+    private static func perpendicularCenterDistance(
+        _ candidate: CGRect,
+        current: CGRect,
+        direction: PaneNavigationDirection
+    ) -> CGFloat {
+        switch direction {
+        case .left, .right: return abs(candidate.midY - current.midY)
+        case .up, .down:    return abs(candidate.midX - current.midX)
         }
     }
 }

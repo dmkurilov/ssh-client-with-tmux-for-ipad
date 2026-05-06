@@ -27,16 +27,47 @@ import ColorSchemes
 /// first responder. Critical: the stock class *does* become FR on
 /// touch (via its UIKeyInput chain), and when it does iPadOS sees
 /// a UIKeyInput FR holder and draws the system shortcut bar (the
-/// `esc / ctrl / F1–F8 / arrows / icons` strip). Refusing FR keeps
-/// the chrome away — `TerminalHost` (a plain UIResponder) is the
-/// only FR holder in this hierarchy.
+/// `esc / ctrl / F1–F8 / arrows / icons` strip). It also steals
+/// FR away from `TerminalHost` after a `selectPane` flip, breaking
+/// our `keyCommands` registration — that was the immediate cause
+/// of "⌘⌥+arrow only works once" in the demo.
+///
+/// `canBecomeFirstResponder = false` blocks the system path that
+/// asks before claiming, but SwiftTerm sometimes calls
+/// `becomeFirstResponder()` *directly* (programmatically, via its
+/// own gesture recognizers). The explicit override of that method
+/// shuts down that path too. Belt-and-suspenders is correct here:
+/// if either fails, every UIKeyCommand we register on the host
+/// stops being consulted because FR has moved.
 final class RenderOnlyTerminalView: SwiftTerm.TerminalView {
     override var canBecomeFirstResponder: Bool { false }
+
+    override func becomeFirstResponder() -> Bool {
+        // Refuse all FR claims unconditionally.
+        return false
+    }
+
+    /// Strip all `UIKeyCommand` registrations the parent class
+    /// might surface. iOS otherwise consults this view's
+    /// `keyCommands` when matching a chord up the responder
+    /// chain, which let SwiftTerm's own arrow-key handlers fire
+    /// on pane %2 even after our `becomeFirstResponder` refused.
+    override var keyCommands: [UIKeyCommand]? { nil }
+}
+
+/// Direction for spatial pane navigation routed through
+/// `UIKeyCommand`. Exposed publicly so the App layer can map it
+/// onto its own `PaneNavigationDirection` (the App side enum is
+/// declared in `TerminalSessionState.swift` and we don't share
+/// the type across module boundaries).
+public enum TerminalNavigationDirection {
+    case left, right, up, down
 }
 
 final class TerminalHost: UIView {
     let terminalView: RenderOnlyTerminalView
     var onInput: ((Data) -> Void)?
+    var onNavigatePane: ((TerminalNavigationDirection) -> Void)?
     var log: ((String) -> Void)?
 
     /// Whether this host should currently own first responder.
@@ -54,9 +85,11 @@ final class TerminalHost: UIView {
             // `didMoveToWindow` will use the value we set here.
             guard window != nil else { return }
             if isActivePane, !isFirstResponder {
-                _ = becomeFirstResponder()
+                let ok = becomeFirstResponder()
+                log?("isActivePane=true → becomeFR=\(ok) isFirst=\(isFirstResponder)")
             } else if !isActivePane, isFirstResponder {
-                _ = resignFirstResponder()
+                let ok = resignFirstResponder()
+                log?("isActivePane=false → resignFR=\(ok) isFirst=\(isFirstResponder)")
             }
         }
     }
@@ -65,6 +98,10 @@ final class TerminalHost: UIView {
         terminalView = RenderOnlyTerminalView(frame: frame)
         super.init(frame: frame)
         addSubview(terminalView)
+        // Render-only: no touches, hovers, presses ever route into
+        // SwiftTerm. Cuts off the path where SwiftTerm's input
+        // handlers would otherwise consume ⌘⌥+arrow chords.
+        terminalView.isUserInteractionEnabled = false
         terminalView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -79,6 +116,73 @@ final class TerminalHost: UIView {
     }
 
     override var canBecomeFirstResponder: Bool { true }
+
+    /// `UIKeyCommand` registrations. Used for `⌘⌥+arrow` pane
+    /// navigation because SwiftUI's `.keyboardShortcut(.rightArrow,
+    /// modifiers: [.command, .option])` wasn't reaching our hidden
+    /// shortcut buttons in practice — chord either consumed by
+    /// iPadOS / Simulator before reaching SwiftUI's responder
+    /// chain, or filtered out at SwiftUI's hosting layer. UIKit's
+    /// `keyCommands` is the system path text-editing apps use and
+    /// runs at first responder before SwiftUI gets a look.
+    override var keyCommands: [UIKeyCommand]? {
+        return [
+            // Diagnostic: a benign chord nothing else uses. If `⌘0`
+            // logs but `⌘⌥+arrow` doesn't, the macOS host that
+            // runs the Simulator (Stage Manager / Mission Control)
+            // is consuming the arrow chord before iPadOS sees it.
+            // Real-iPad behavior would differ.
+            UIKeyCommand(
+                action: #selector(handleDiagnosticZero),
+                input: "0",
+                modifierFlags: [.command]
+            ),
+            UIKeyCommand(
+                action: #selector(handleNavLeft),
+                input: UIKeyCommand.inputLeftArrow,
+                modifierFlags: [.command, .alternate]
+            ),
+            UIKeyCommand(
+                action: #selector(handleNavRight),
+                input: UIKeyCommand.inputRightArrow,
+                modifierFlags: [.command, .alternate]
+            ),
+            UIKeyCommand(
+                action: #selector(handleNavUp),
+                input: UIKeyCommand.inputUpArrow,
+                modifierFlags: [.command, .alternate]
+            ),
+            UIKeyCommand(
+                action: #selector(handleNavDown),
+                input: UIKeyCommand.inputDownArrow,
+                modifierFlags: [.command, .alternate]
+            ),
+        ]
+    }
+
+    @objc private func handleDiagnosticZero() {
+        log?("UIKeyCommand ⌘0 fired (diagnostic)")
+    }
+
+    @objc private func handleNavLeft() {
+        log?("UIKeyCommand ⌘⌥← fired")
+        onNavigatePane?(.left)
+    }
+
+    @objc private func handleNavRight() {
+        log?("UIKeyCommand ⌘⌥→ fired")
+        onNavigatePane?(.right)
+    }
+
+    @objc private func handleNavUp() {
+        log?("UIKeyCommand ⌘⌥↑ fired")
+        onNavigatePane?(.up)
+    }
+
+    @objc private func handleNavDown() {
+        log?("UIKeyCommand ⌘⌥↓ fired")
+        onNavigatePane?(.down)
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -100,6 +204,15 @@ final class TerminalHost: UIView {
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var unhandled: Set<UIPress> = []
         for press in presses {
+            // Diagnostic: log every key, including modifier-driven
+            // ones we deliberately let bubble. Helps tell whether
+            // SwiftUI `.keyboardShortcut` routing is broken (key
+            // arrives here but the SwiftUI button never fires) vs
+            // the system intercepting the chord upstream.
+            if let key = press.key {
+                let mods = key.modifierFlags
+                log?("pressesBegan keyCode=\(key.keyCode.rawValue) mods=\(mods.rawValue) chars='\(key.characters)'")
+            }
             if let bytes = press.key.flatMap(encodeKey) {
                 onInput?(Data(bytes))
                 log?("HW key → \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "))")
@@ -187,6 +300,10 @@ public struct SwiftTermView: UIViewRepresentable {
     let isActive: Bool
     let onInput: (Data) -> Void
     let onSizeChange: (Int, Int) -> Void
+    /// Caller-supplied handler for `⌘⌥+arrow` pane navigation.
+    /// Routed through UIKit's `keyCommands`, not SwiftUI's
+    /// `.keyboardShortcut`.
+    let onNavigatePane: ((TerminalNavigationDirection) -> Void)?
     /// Optional debug logger — wired through to the App's
     /// `FileLogger` so FR transitions and HW-key traffic show up
     /// in `debug.log`.
@@ -198,6 +315,7 @@ public struct SwiftTermView: UIViewRepresentable {
         isActive: Bool = true,
         onInput: @escaping (Data) -> Void,
         onSizeChange: @escaping (Int, Int) -> Void = { _, _ in },
+        onNavigatePane: ((TerminalNavigationDirection) -> Void)? = nil,
         onLog: ((String) -> Void)? = nil
     ) {
         self.driver = driver
@@ -205,6 +323,7 @@ public struct SwiftTermView: UIViewRepresentable {
         self.isActive = isActive
         self.onInput = onInput
         self.onSizeChange = onSizeChange
+        self.onNavigatePane = onNavigatePane
         self.onLog = onLog
     }
 
@@ -215,6 +334,7 @@ public struct SwiftTermView: UIViewRepresentable {
         let host = TerminalHost(frame: .zero)
         host.terminalView.terminalDelegate = context.coordinator
         host.onInput = onInput
+        host.onNavigatePane = onNavigatePane
         host.log = onLog
         host.isActivePane = isActive
         context.coordinator.log = onLog
@@ -236,6 +356,7 @@ public struct SwiftTermView: UIViewRepresentable {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
         host.onInput = onInput
+        host.onNavigatePane = onNavigatePane
         host.log = onLog
         context.coordinator.log = onLog
         context.coordinator.wantsKeyboard = isActive

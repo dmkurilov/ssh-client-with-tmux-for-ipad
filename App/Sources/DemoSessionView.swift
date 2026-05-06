@@ -50,6 +50,20 @@ struct DemoSessionView: View {
     /// confirmation-dialog action sheet below.
     @State private var actionTab: WindowInfo?
 
+    /// Hover state for the exit-fullscreen affordance. iPadOS
+    /// trackpad / pencil / mouse pointer drive `.onHover`. Touch
+    /// taps don't, so this lights up only when a pointer device
+    /// is over the button — useful as both an affordance and a
+    /// diagnostic signal.
+    @State private var exitFullScreenHovered: Bool = false
+
+    /// While `true`, the rendering layer treats *no* pane as
+    /// active. Used as a 200ms feedback blink when `⌘⌥+arrow`
+    /// hits a wall — the active pane briefly dims so the user
+    /// sees "I tried, but I can't go that way." Set true on the
+    /// failed nav attempt and cleared by a delayed `Task`.
+    @State private var paneNavBlink: Bool = false
+
     // `HardwareKeyboardObserver.shared` informs the initial
     // `specialKeysVisible` default. After mount, the user owns the
     // toggle; we don't auto-flip on connect/disconnect to avoid
@@ -93,22 +107,47 @@ struct DemoSessionView: View {
                     })
                 }
             }
-            // Near-transparent exit-fullscreen affordance per UI
-            // vision §3.1: only visible when toolbar is hidden, and
-            // intentionally low-opacity so it doesn't compete with
-            // pane content.
+            // Bare exit-fullscreen affordance per UI vision §3.1.
+            // No background circle — the icon alone, grey at rest,
+            // blue when a pointer device hovers (trackpad / pencil /
+            // mouse). Touch taps don't fire `onHover`, so finger
+            // users see only grey but the tap still works.
+            //
+            // `Image` + `.onTapGesture` (not `Button`) because
+            // button taps lose to the SwiftTerm view's gesture
+            // chain underneath. `.simultaneousGesture` keeps a
+            // backup tap path in case the primary loses again.
+            //
+            // The 8pt internal padding gives the hit area room to
+            // breathe without a visual frame; `.contentShape` makes
+            // the entire padded rectangle tappable, not just the
+            // icon glyph.
             if fullScreen {
-                Button {
-                    fullScreen = false
-                    FileLogger.shared.log("Demo: exit-fullscreen affordance tapped")
-                } label: {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        .font(.title3)
-                        .padding(8)
-                        .background(.thinMaterial, in: Circle())
-                }
-                .opacity(0.35)
-                .padding(8)
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.title3)
+                    .foregroundStyle(exitFullScreenHovered ? Color.accentColor : Color.gray)
+                    .padding(8)
+                    .contentShape(Rectangle())
+                    .onHover { hovered in
+                        exitFullScreenHovered = hovered
+                        FileLogger.shared.log("Demo: exit-fs hover → \(hovered)")
+                    }
+                    .onTapGesture {
+                        FileLogger.shared.log("Demo: exit-fs onTapGesture FIRED → setting fullScreen=false")
+                        fullScreen = false
+                    }
+                    .simultaneousGesture(
+                        TapGesture()
+                            .onEnded {
+                                FileLogger.shared.log("Demo: exit-fs simultaneousGesture FIRED")
+                                if fullScreen {
+                                    fullScreen = false
+                                }
+                            }
+                    )
+                    .padding(.top, 4)
+                    .padding(.trailing, 6)
+                    .zIndex(1)
             }
         }
         .statusBarHidden(fullScreen)
@@ -328,6 +367,21 @@ struct DemoSessionView: View {
                 Divider()
             }
             paneContent
+                // Visible "can't go there" feedback for `⌘⌥+arrow`
+                // hitting a wall: dim the entire pane region AND
+                // overlay a red wash for 200ms. Two visual cues
+                // because earlier (subtler) attempts went unnoticed.
+                .opacity(paneNavBlink ? 0.3 : 1.0)
+                .overlay {
+                    if paneNavBlink {
+                        Color.red.opacity(0.18)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.08), value: paneNavBlink)
+                .onChange(of: paneNavBlink) { old, new in
+                    FileLogger.shared.log("Demo: paneNavBlink \(old) → \(new)")
+                }
         }
     }
 
@@ -335,12 +389,18 @@ struct DemoSessionView: View {
     private var paneContent: some View {
         if let win = backend.state.activeWindow, !win.paneIDs.isEmpty {
             if let zoomed = backend.state.zoomedPaneID, win.paneIDs.contains(zoomed) {
-                // Zoomed: only the zoomed pane fills the area.
-                // Active flag forced to true since user just zoomed
-                // it; tmux's behaviour is the same.
-                paneCell(paneID: zoomed, isActive: true)
+                // Zoomed: only the zoomed pane fills the area, no
+                // control bar. User exits zoom via `⌘⇧Enter` or the
+                // pane menu (still reachable when un-zoomed).
+                paneCell(paneID: zoomed, isActive: !paneNavBlink, showControlBar: false)
             } else {
-                renderNode(win.layout, activePaneID: win.activePaneID)
+                // `paneNavBlink` overrides the active pane id with
+                // nil so every pane renders as inactive — the brief
+                // "can't go there" feedback for `⌘⌥+arrow`.
+                renderNode(
+                    win.layout,
+                    activePaneID: paneNavBlink ? nil : win.activePaneID
+                )
             }
         } else {
             VStack(spacing: 8) {
@@ -474,9 +534,12 @@ struct DemoSessionView: View {
     }
 
     @ViewBuilder
-    private func paneCell(paneID: Int, isActive: Bool) -> some View {
+    private func paneCell(paneID: Int, isActive: Bool, showControlBar: Bool = true) -> some View {
         if let pane = backend.pane(paneID) {
-            ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                if showControlBar {
+                    paneControlBar(paneID: paneID, isActive: isActive)
+                }
                 ZStack {
                     SwiftTermView(
                         driver: pane.driver,
@@ -488,8 +551,15 @@ struct DemoSessionView: View {
                         onSizeChange: { cols, rows in
                             Task { await pane.resize(cols: cols, rows: rows) }
                         },
+                        onNavigatePane: { dir in
+                            navigatePane(Self.mapDirection(dir))
+                        },
                         onLog: { msg in
-                            FileLogger.shared.log("Demo[%\(paneID)] \(msg)")
+                            // forceLog so HW-key tracing reaches the
+                            // file even when the user hasn't toggled
+                            // logging on. Diagnostic for the
+                            // ⌘⌥+arrow nav investigation.
+                            FileLogger.shared.forceLog("Demo[%\(paneID)] \(msg)")
                         }
                     )
                     .disabled(!isActive)
@@ -502,10 +572,8 @@ struct DemoSessionView: View {
                             }
                     }
                 }
-                paneControlOverlay(paneID: paneID)
-                    .padding(6)
+                .opacity(isActive ? 1.0 : 0.8)
             }
-            .opacity(isActive ? 1.0 : 0.8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // Identity tied to pane id so SwiftUI doesn't recycle a
             // view onto a different pane's driver during a layout
@@ -516,32 +584,46 @@ struct DemoSessionView: View {
         }
     }
 
-    /// Per-pane control strip rendered in the top-right corner.
-    /// Near-transparent at rest per UI vision §3.4. Touch users tap
-    /// the `x` to close, `...` to open the menu, or drag the strip
-    /// itself to move the pane onto another tab.
-    private func paneControlOverlay(paneID: Int) -> some View {
-        HStack(spacing: 2) {
-            // Drag handle. iPadOS turns press-and-drag into a drag
-            // gesture; quick taps still fire the `x` and `...`
-            // children below. Per UI vision §3.4 the strip itself
-            // is the handle — no separate drag dot.
-            Image(systemName: "line.3.horizontal")
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
-
+    /// Solid strip at the top of each pane: `[x] | <title> | [⋯]`.
+    /// The whole strip is the drag handle for moving panes onto
+    /// other tabs. Active pane gets an accent tint; inactive panes
+    /// fade to the system tertiary background.
+    ///
+    /// Hidden when the pane is zoomed (one pane fills the tab area)
+    /// — the user exits zoom via the `⌘⇧Enter` shortcut or the
+    /// `…` menu.
+    private func paneControlBar(paneID: Int, isActive: Bool) -> some View {
+        let title = backend.paneTitle(paneID) ?? "%\(paneID)"
+        return HStack(spacing: 8) {
             Button {
                 Task { await backend.killPane(paneID) }
                 FileLogger.shared.log("Demo: pane x %\(paneID)")
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 6)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            Text(title)
+                .font(.caption.monospaced())
+                .foregroundStyle(isActive ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Tap on the strip's title selects the pane —
+                // matches "tap inactive pane to focus" via a more
+                // discoverable target than the empty-pane Color.clear.
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !isActive {
+                        Task { await backend.selectPane(paneID) }
+                        FileLogger.shared.log("Demo: pane title tap %\(paneID)")
+                    }
+                }
 
             Menu {
                 Button {
@@ -563,8 +645,8 @@ struct DemoSessionView: View {
                     Label("Toggle pane zoom", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
                 Divider()
-                // Move-to is the menu equivalent of drag-to-tab;
-                // a target picker UI is TBD.
+                // Move-to is the menu equivalent of drag-to-tab; a
+                // target picker UI is TBD.
                 Button("Move pane to …") {
                     FileLogger.shared.log("Demo: pane move %\(paneID) (TBD)")
                 }
@@ -597,8 +679,9 @@ struct DemoSessionView: View {
                 .disabled(true)
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 6)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
             }
@@ -608,15 +691,20 @@ struct DemoSessionView: View {
             // screen). `.fixed` keeps declaration order regardless.
             .menuOrder(.fixed)
         }
-        .foregroundStyle(.secondary)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
-        .opacity(0.55)
-        // Encode pane id as a String so we don't have to define a
-        // custom Transferable. `parseDraggedPaneID` on the tab
-        // dropDestination demuxes.
+        .background(
+            isActive
+                ? Color.accentColor.opacity(0.18)
+                : Color(.tertiarySystemBackground)
+        )
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(.separator))
+                .frame(height: 0.5)
+        }
+        // The whole strip is the drag handle for moving the pane
+        // onto another tab. Buttons inside still receive taps; iOS
+        // distinguishes drag-press-and-move from tap.
         .draggable("pane:%\(paneID)") {
-            // Drag preview: a compact pill so the user sees what
-            // they're carrying without obscuring the destination.
             Text("pane %\(paneID)")
                 .font(.caption.monospaced())
                 .padding(.horizontal, 8)
@@ -698,12 +786,96 @@ struct DemoSessionView: View {
                 FileLogger.shared.log("Demo: ⌘T new-tab")
             }
             .keyboardShortcut("t", modifiers: .command)
+
+            // ⌘1..⌘9 → jump to tab N (1-based). Out-of-range
+            // shortcuts no-op; we don't shift to "last tab" because
+            // that's ambiguous.
+            ForEach(1...9, id: \.self) { idx in
+                Button("Switch to tab \(idx)") {
+                    let windows = backend.state.windows
+                    guard idx - 1 < windows.count else {
+                        FileLogger.shared.log("Demo: ⌘\(idx) — no tab")
+                        return
+                    }
+                    let target = windows[idx - 1].id
+                    Task { await backend.selectWindow(target) }
+                    FileLogger.shared.log("Demo: ⌘\(idx) → @\(target)")
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
+            }
+
+            // ⌘⌥+arrow → spatial pane navigation. Edges no-op
+            // (`PaneNode.neighbor` returns nil at boundaries).
+            Button("Pane right") {
+                navigatePane(.right)
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            Button("Pane left") {
+                navigatePane(.left)
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            Button("Pane up") {
+                navigatePane(.up)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button("Pane down") {
+                navigatePane(.down)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [.command, .option])
         }
         .opacity(0)
         .allowsHitTesting(false)
     }
 
     // MARK: - Actions
+
+    /// Translate `TerminalKit`'s direction enum (used by the
+    /// UIKit `keyCommands` path) into the App-side enum used by
+    /// `PaneNode.neighbor`. Both have the same cases; we just
+    /// don't share the type across the module boundary.
+    static func mapDirection(_ dir: TerminalNavigationDirection) -> PaneNavigationDirection {
+        switch dir {
+        case .left:  return .left
+        case .right: return .right
+        case .up:    return .up
+        case .down:  return .down
+        }
+    }
+
+    private func navigatePane(_ direction: PaneNavigationDirection) {
+        // Uses `forceLog` (bypasses the `Write debug log` toggle)
+        // so a fresh install with logging off still produces
+        // diagnostic evidence. Pure diagnostic — remove once nav
+        // is verified end-to-end.
+        let activePID = backend.state.activePaneID
+        let winID = backend.state.activeWindowID
+        let msg0 = "Demo navigatePane(\(direction)) activePane=\(activePID.map { "%\($0)" } ?? "nil") activeWin=\(winID.map { "@\($0)" } ?? "nil")"
+        FileLogger.shared.forceLog(msg0)
+        print("[Demo] " + msg0)
+
+        guard let pid = activePID,
+              let win = backend.state.activeWindow
+        else {
+            FileLogger.shared.forceLog("Demo navigatePane bail — no active pane/window")
+            return
+        }
+        let next = win.layout.neighbor(of: pid, direction: direction)
+        let msg1 = "Demo neighbor(of: %\(pid), \(direction)) = \(next.map { "%\($0)" } ?? "nil")"
+        FileLogger.shared.forceLog(msg1)
+        print("[Demo] " + msg1)
+
+        if let next {
+            Task { await backend.selectPane(next) }
+        } else {
+            paneNavBlink = true
+            FileLogger.shared.forceLog("Demo paneNavBlink = true (no neighbor)")
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(200))
+                paneNavBlink = false
+                FileLogger.shared.forceLog("Demo paneNavBlink = false (timer)")
+            }
+        }
+    }
 
     private func close() {
         FileLogger.shared.log("Demo: close pressed")

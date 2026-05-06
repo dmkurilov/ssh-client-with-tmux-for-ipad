@@ -161,6 +161,11 @@ final class FakeSessionBackend: SessionBackend {
         state.sessionName = newName
     }
 
+    func paneTitle(_ paneID: Int) -> String? {
+        guard panes[paneID] != nil else { return nil }
+        return "echo pane %\(paneID) — \(echoDelay) round-trip"
+    }
+
     func toggleZoom(paneID: Int) async {
         // Only zoom panes that exist. Toggling on the same pane
         // un-zooms; toggling on a different pane swaps the zoom
