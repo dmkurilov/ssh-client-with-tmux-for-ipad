@@ -167,6 +167,23 @@ final class TmuxSessionBackend: SessionBackend {
         await write("join-pane -s %\(paneID) -t :@\(windowID)\n")
     }
 
+    func movePane(paneID: Int, toPane targetID: Int, edge: PaneDropEdge) async {
+        // tmux `join-pane` flag mapping:
+        //   -h  → horizontal split (panes side-by-side)
+        //   -v  → vertical split   (panes stacked)
+        //   -b  → place source *before* target (left / above)
+        //   absent → place source *after* target (right / below)
+        let directionFlag: String
+        let beforeFlag: String
+        switch edge {
+        case .top:    directionFlag = "-v"; beforeFlag = " -b"
+        case .bottom: directionFlag = "-v"; beforeFlag = ""
+        case .left:   directionFlag = "-h"; beforeFlag = " -b"
+        case .right:  directionFlag = "-h"; beforeFlag = ""
+        }
+        await write("join-pane -s %\(paneID) -t %\(targetID) \(directionFlag)\(beforeFlag)\n")
+    }
+
     func paneTitle(_ paneID: Int) -> String? {
         // v1: the tmux pane id. A future pass can subscribe to
         // `pane_current_command` / `pane_title` via

@@ -228,6 +228,52 @@ final class FakeSessionBackend: SessionBackend {
         }
     }
 
+    func movePane(paneID: Int, toPane targetID: Int, edge: PaneDropEdge) async {
+        FileLogger.shared.log("FakeSession.movePane %\(paneID) → %\(targetID) edge=\(edge)")
+        guard paneID != targetID else { return }
+        guard panes[paneID] != nil, panes[targetID] != nil else { return }
+
+        // 1. Remove source from its current window. If it empties
+        //    the window, drop the window — same rule as the
+        //    tab-target movePane variant.
+        for i in state.windows.indices.reversed() where state.windows[i].paneIDs.contains(paneID) {
+            var w = state.windows[i]
+            if let pruned = w.layout.removingPane(paneID) {
+                w.layout = pruned
+                if !pruned.allPaneIDs.contains(w.activePaneID ?? -1) {
+                    w.activePaneID = pruned.allPaneIDs.first
+                }
+                state.windows[i] = w
+            } else {
+                FileLogger.shared.log("FakeSession.movePane: pruned empty window @\(w.id)")
+                state.windows.remove(at: i)
+            }
+            break
+        }
+
+        // 2. Find target's window (post-source-removal) and replace
+        //    its leaf with a 2-child split holding source+target on
+        //    the requested edge.
+        guard let dstIdx = state.windows.firstIndex(where: { $0.paneIDs.contains(targetID) })
+        else { return }
+        var dst = state.windows[dstIdx]
+        let direction: SplitDirection = (edge == .top || edge == .bottom) ? .vertical : .horizontal
+        let sourceFirst = (edge == .top || edge == .left)
+        let children: [PaneNode] = sourceFirst
+            ? [.leaf(paneID: paneID), .leaf(paneID: targetID)]
+            : [.leaf(paneID: targetID), .leaf(paneID: paneID)]
+        let replacement: PaneNode = .split(direction: direction, children: children)
+        dst.layout = dst.layout.replacingLeaf(target: targetID, with: replacement)
+        dst.activePaneID = paneID
+        state.windows[dstIdx] = dst
+        state.activeWindowID = dst.id
+
+        // tmux clears the zoom flag on layout-changing operations.
+        if state.zoomedPaneID == paneID || state.zoomedPaneID == targetID {
+            state.zoomedPaneID = nil
+        }
+    }
+
     // MARK: - ID minting
 
     private func newPaneID() -> Int {

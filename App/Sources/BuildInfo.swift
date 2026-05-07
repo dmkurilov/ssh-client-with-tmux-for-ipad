@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-07d — tolerate empty tmux ls (exit 1)"
+    static let signature = "2026-05-07k — defer becomeFR to fix sibling race"
 }

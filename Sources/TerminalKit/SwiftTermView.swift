@@ -85,8 +85,31 @@ final class TerminalHost: UIView {
             // `didMoveToWindow` will use the value we set here.
             guard window != nil else { return }
             if isActivePane, !isFirstResponder {
-                let ok = becomeFirstResponder()
-                log?("isActivePane=true → becomeFR=\(ok) isFirst=\(isFirstResponder)")
+                // **Defer to the next run-loop tick.** SwiftUI calls
+                // `updateUIView` for sibling panes synchronously
+                // during a batch update, in an order it doesn't
+                // promise. If we call `becomeFirstResponder()` here
+                // while the sibling pane is still mid-update (its
+                // own `resignFirstResponder()` hasn't yet run), the
+                // call returns `true` but UIKit ends up with no
+                // first responder once the sibling's `resignFR`
+                // completes — keys are then dropped. Deferring lets
+                // the sibling resign first, so we claim FR against
+                // a stable window state.
+                //
+                // Reproduction (without this fix): tap pane B, type
+                // — nothing. Tap pane A, type — works. Tap B again,
+                // type — still nothing. Always reproducible because
+                // the broken-state paths are deterministic.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    guard self.isActivePane,
+                          !self.isFirstResponder,
+                          self.window != nil
+                    else { return }
+                    let ok = self.becomeFirstResponder()
+                    self.log?("isActivePane=true → becomeFR=\(ok) isFirst=\(self.isFirstResponder) (async)")
+                }
             } else if !isActivePane, isFirstResponder {
                 let ok = resignFirstResponder()
                 log?("isActivePane=false → resignFR=\(ok) isFirst=\(isFirstResponder)")
@@ -113,6 +136,15 @@ final class TerminalHost: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not supported")
+    }
+
+    deinit {
+        // Pane-id-prefixed via the caller's `log` closure. The
+        // ObjectIdentifier disambiguates instances when SwiftUI
+        // recycles a paneCell (which would leave us with multiple
+        // TerminalHosts for the same pane id, only one of which
+        // is in the visible hierarchy).
+        log?("TerminalHost deinit id=\(ObjectIdentifier(self).hashValue & 0xFFFF)")
     }
 
     override var canBecomeFirstResponder: Bool { true }
@@ -157,22 +189,28 @@ final class TerminalHost: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        let hostID = ObjectIdentifier(self).hashValue & 0xFFFF
         if window == nil {
+            log?("TerminalHost didMoveToWindow window=nil active=\(isActivePane) FR=\(isFirstResponder) id=\(hostID)")
             if isFirstResponder {
                 _ = resignFirstResponder()
             }
             return
         }
+        log?("TerminalHost didMoveToWindow window=set active=\(isActivePane) FR=\(isFirstResponder) id=\(hostID)")
         // Only claim if this is the active pane. The inactive pane's
         // host stays passive on mount.
         if isActivePane, !isFirstResponder {
-            _ = becomeFirstResponder()
+            let ok = becomeFirstResponder()
+            log?("TerminalHost didMoveToWindow becomeFR=\(ok) id=\(hostID)")
         }
     }
 
     // MARK: - Hardware key handling
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let hostID = ObjectIdentifier(self).hashValue & 0xFFFF
+        log?("TerminalHost pressesBegan count=\(presses.count) FR=\(isFirstResponder) active=\(isActivePane) onInputSet=\(onInput != nil) id=\(hostID)")
         var unhandled: Set<UIPress> = []
         for press in presses {
             if let bytes = press.key.flatMap(encodeKey) {
@@ -302,6 +340,7 @@ public struct SwiftTermView: UIViewRepresentable {
         if let scheme {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
+        onLog?("TerminalHost makeUIView active=\(isActive) id=\(ObjectIdentifier(host).hashValue & 0xFFFF)")
         // We *don't* bind the driver here. SwiftTerm computes
         // cols/rows from its frame, and at makeUIView time the
         // frame can still be zero (especially in nested SwiftUI

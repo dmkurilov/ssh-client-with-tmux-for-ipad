@@ -7,6 +7,25 @@ enum PaneNavigationDirection {
     case left, right, up, down
 }
 
+/// `Identifiable` wrapper around a `(paneID, frame)` pair for use
+/// in the flat treemap-style pane renderer. SwiftUI tracks each
+/// `paneCell` by `paneID` (stable across tree rearrangements),
+/// which is the whole point — without it, splitting a leaf into a
+/// branch destroys the leaf's `TerminalHost` because the parent's
+/// shape changed.
+struct PaneLayoutEntry: Identifiable, Equatable {
+    let id: Int
+    let frame: CGRect
+}
+
+/// Which edge of the target pane a dropped pane lands against.
+/// `top`/`bottom` produce a vertical split (panes stacked); `left`/
+/// `right` produce a horizontal split (panes side-by-side). Maps
+/// 1:1 to tmux's `join-pane -h/-v [-b]` flags.
+enum PaneDropEdge {
+    case top, bottom, left, right
+}
+
 /// One window's worth of state as the UI sees it. Identifiers map
 /// onto tmux's `@<id>` and `%<id>` for the real backend; the fake
 /// uses synthetic small ints with the same shape.
@@ -47,6 +66,23 @@ indirect enum PaneNode: Equatable {
                 children: kids.map {
                     $0.splitting(target: target, direction: direction, newID: newID)
                 }
+            )
+        }
+    }
+
+    /// Replace the leaf for `target` with `replacement` (which may
+    /// itself be a subtree). No-op if `target` isn't in the tree.
+    /// Used by pane-to-pane drag-drop: source is first removed, then
+    /// the target leaf is replaced by a 2-child split holding the
+    /// target plus the source on the chosen edge.
+    func replacingLeaf(target: Int, with replacement: PaneNode) -> PaneNode {
+        switch self {
+        case .leaf(let pid):
+            return pid == target ? replacement : self
+        case .split(let dir, let kids):
+            return .split(
+                direction: dir,
+                children: kids.map { $0.replacingLeaf(target: target, with: replacement) }
             )
         }
     }
@@ -101,7 +137,11 @@ indirect enum PaneNode: Equatable {
         }?.id
     }
 
-    private func paneRects(in frame: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1))
+    /// Compute an absolute rectangle for every leaf pane, recursing
+    /// through the split tree. Used by spatial pane navigation
+    /// (default unit-rect frame) and by the flat treemap-style
+    /// pane renderer (frame = the pane area's actual size).
+    func paneRects(in frame: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1))
         -> [(id: Int, frame: CGRect)]
     {
         switch self {

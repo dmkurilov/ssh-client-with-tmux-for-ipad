@@ -400,13 +400,62 @@ struct DemoSessionView: View {
                 // pane menu (still reachable when un-zoomed).
                 paneCell(paneID: zoomed, isActive: !paneNavBlink, showControlBar: false)
             } else {
+                // Flat treemap layout: compute each pane's frame
+                // from the split tree, render everything in one
+                // ZStack keyed by paneID. This keeps SwiftUI from
+                // destroying a pane's `TerminalHost` whenever its
+                // parent's shape changes (e.g. leaf %2 turning into
+                // `[vertical: %2, %3]` when split). The HStack/
+                // VStack-recursion approach we used before rebuilt
+                // every nested view on each layout edit, which
+                // leaked stale TerminalHosts and broke key input
+                // routing.
+                //
                 // `paneNavBlink` overrides the active pane id with
                 // nil so every pane renders as inactive — the brief
                 // "can't go there" feedback for `⌘⌥+arrow`.
-                renderNode(
-                    win.layout,
-                    activePaneID: paneNavBlink ? nil : win.activePaneID
-                )
+                GeometryReader { geo in
+                    let entries: [PaneLayoutEntry] = win.layout
+                        .paneRects(in: CGRect(origin: .zero, size: geo.size))
+                        .map { PaneLayoutEntry(id: $0.id, frame: $0.frame) }
+                    let active = paneNavBlink ? nil : win.activePaneID
+                    ZStack(alignment: .topLeading) {
+                        // `paneSeparator` doubles as: (a) an anchor
+                        // that expands the ZStack to the full geo
+                        // size, and (b) the visible 1pt strip
+                        // between adjacent panes, shown through
+                        // each paneCell's `.insetBy` gap. Same role
+                        // the HStack/VStack `spacing: 1
+                        // .background(paneSeparator)` played in the
+                        // old recursive renderer.
+                        paneSeparator
+                        ForEach(entries) { entry in
+                            let f = entry.frame.insetBy(dx: 0.5, dy: 0.5)
+                            // `.position` (centre-based, absolute)
+                            // not `.offset` (visual-only). `.offset`
+                            // leaves the view's *layout* origin at
+                            // (0,0) — every paneCell ends up laid
+                            // out on top of every other one, only
+                            // their rendered pixels differ. UIKit
+                            // hit-testing and key-event routing use
+                            // the underlying UIView frames, so
+                            // overlapping layouts caused stale
+                            // first-responder dispatch on inactive
+                            // panes. `.position` writes the real
+                            // frame into the UIView, so the
+                            // responder chain matches what the user
+                            // sees.
+                            paneCell(paneID: entry.id, isActive: entry.id == active)
+                                .frame(width: f.width, height: f.height)
+                                .position(x: f.midX, y: f.midY)
+                        }
+                    }
+                    .frame(
+                        width: geo.size.width,
+                        height: geo.size.height,
+                        alignment: .topLeading
+                    )
+                }
             }
         } else {
             VStack(spacing: 8) {
@@ -418,42 +467,6 @@ struct DemoSessionView: View {
                 .buttonStyle(.borderedProminent)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    /// Recursive renderer for `PaneNode`. Returns `AnyView` because
-    /// the natural `some View` return shape varies by case (leaf vs
-    /// HStack vs VStack); the existing `TmuxSessionView.paneTree`
-    /// uses the same pattern. Type erasure costs an allocation per
-    /// node, which is fine for the small trees a real tmux layout
-    /// produces.
-    ///
-    /// Inter-pane separators: each split sets its own background to
-    /// `paneSeparator`, and lays its children out with `spacing: 1`.
-    /// The 1pt gap exposes the parent's background colour as a thin
-    /// contrast line — light on dark schemes, dark on light schemes.
-    private func renderNode(_ node: PaneNode, activePaneID: Int?) -> AnyView {
-        switch node {
-        case .leaf(let pid):
-            return AnyView(paneCell(paneID: pid, isActive: pid == activePaneID))
-        case .split(.horizontal, let kids):
-            return AnyView(
-                HStack(spacing: 1) {
-                    ForEach(Array(kids.enumerated()), id: \.offset) { _, kid in
-                        renderNode(kid, activePaneID: activePaneID)
-                    }
-                }
-                .background(paneSeparator)
-            )
-        case .split(.vertical, let kids):
-            return AnyView(
-                VStack(spacing: 1) {
-                    ForEach(Array(kids.enumerated()), id: \.offset) { _, kid in
-                        renderNode(kid, activePaneID: activePaneID)
-                    }
-                }
-                .background(paneSeparator)
-            )
         }
     }
 
@@ -573,6 +586,27 @@ struct DemoSessionView: View {
                                 FileLogger.shared.log("Demo: pane tap %\(paneID)")
                             }
                     }
+                    // Pane-to-pane drag target. Four edge-strip drop
+                    // zones: each strip lights up its half live as
+                    // the user drags toward an edge, so they see
+                    // which way the target will be split before
+                    // releasing. Strips also forward quick taps
+                    // through `onTap` so the iPad UX of "tap any-
+                    // where on a pane to focus it" still works
+                    // (the dead-centre is tap-passthrough straight
+                    // to the `Color.clear` shim above).
+                    PaneDropZone(
+                        targetPaneID: paneID,
+                        onDrop: { sourceID, edge in
+                            Task { await backend.movePane(paneID: sourceID, toPane: paneID, edge: edge) }
+                        },
+                        onTap: {
+                            if !isActive {
+                                Task { await backend.selectPane(paneID) }
+                                FileLogger.shared.log("Demo: pane tap %\(paneID) (via dropZone)")
+                            }
+                        }
+                    )
                 }
                 .opacity(isActive ? 1.0 : 0.8)
             }
@@ -707,6 +741,22 @@ struct DemoSessionView: View {
         // onto another tab. Buttons inside still receive taps; iOS
         // distinguishes drag-press-and-move from tap.
         .draggable("pane:%\(paneID)") {
+            DragPreview(paneID: paneID)
+        }
+    }
+
+    /// Drag preview shown under the user's finger during a pane
+    /// drag. The `init` side-effect logs the drag start — SwiftUI
+    /// rebuilds the preview view exactly when the drag session
+    /// begins, which is the closest hook we have to a "did start
+    /// dragging" callback.
+    private struct DragPreview: View {
+        let paneID: Int
+        init(paneID: Int) {
+            self.paneID = paneID
+            FileLogger.shared.log("Demo: drag start %\(paneID)")
+        }
+        var body: some View {
             Text("pane %\(paneID)")
                 .font(.caption.monospaced())
                 .padding(.horizontal, 8)

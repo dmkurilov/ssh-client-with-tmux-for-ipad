@@ -67,6 +67,12 @@ protocol SessionBackend: AnyObject {
     /// window's id arrives.
     func movePane(paneID: Int, toWindow windowID: Int) async
 
+    /// Drop a pane onto another pane. Source ends up on `edge` of
+    /// `target`, splitting `target` along the matching axis (top/
+    /// bottom = vertical; left/right = horizontal). Works inside
+    /// the same window or across windows. Maps to tmux `join-pane`.
+    func movePane(paneID: Int, toPane targetID: Int, edge: PaneDropEdge) async
+
     /// Display title for a pane — typically the foreground command
     /// plus whatever extra status the backend chooses to surface
     /// (e.g. tmux's `pane_title` and `pane_current_command`, or an
@@ -90,5 +96,6 @@ extension SessionBackend {
     func renameSession(_ newName: String) async {}
     func toggleZoom(paneID: Int) async {}
     func movePane(paneID: Int, toWindow windowID: Int) async {}
+    func movePane(paneID: Int, toPane targetID: Int, edge: PaneDropEdge) async {}
     func paneTitle(_ paneID: Int) -> String? { nil }
 }
