@@ -1061,7 +1061,9 @@ struct TmuxSessionView: View {
         // separator literally. Outer single-quoted via `$SHELL -lc`
         // ensures tmux is on PATH from the user's login profile.
         let format = "#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}"
-        let inner = "tmux ls -F \"\(format)\" 2>/dev/null"
+        // `tmux ls` exits 1 when there are zero sessions; `; true`
+        // keeps `conn.exec` from throwing on what is a normal state.
+        let inner = "tmux ls -F \"\(format)\" 2>/dev/null; true"
         let cmd = "$SHELL -lc '\(inner)'"
         let result = try await conn.exec(cmd)
         let stdout = String(decoding: result.stdout, as: UTF8.self)

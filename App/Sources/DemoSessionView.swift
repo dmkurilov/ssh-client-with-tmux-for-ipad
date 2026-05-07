@@ -16,6 +16,10 @@ struct DemoSessionView: View {
     /// observation; the protocol type is just dispatch.
     let backend: any SessionBackend
     let scheme: ColorSchemes.ColorScheme?
+    /// `false` for production-mode (real `TmuxSessionBackend`),
+    /// `true` for the demo-only `FakeSessionBackend` so users can
+    /// see they're not connected to anything real.
+    var showFakeBadge: Bool = true
     /// Optional explicit close callback. Used when the demo lives
     /// inside a `.fullScreenCover` *and* a `NavigationStack`, where
     /// `Environment(\.dismiss)` can resolve to "pop nav stack" first
@@ -229,9 +233,11 @@ struct DemoSessionView: View {
                 Text(backend.state.sessionName ?? "demo")
                     .font(.headline)
                     .onLongPressGesture { beginRenameSession() }
-                Text("(FAKE)")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.orange)
+                if showFakeBadge {
+                    Text("(FAKE)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.orange)
+                }
                 Button {
                     beginRenameSession()
                 } label: {
