@@ -37,6 +37,15 @@ final class TmuxSessionBackend: SessionBackend {
     private var shell: SSHShellSession?
     private var paneBackends: [Int: TmuxPaneBackend] = [:]
 
+    /// Pane-title polling task. Runs `list-panes -aF "#{pane_id}\t
+    /// #{pane_current_command}"` every few seconds and writes the
+    /// result into `state.paneTitles`. tmux doesn't push a
+    /// "pane current command changed" event, and asking on every
+    /// `%output` would be needlessly chatty, so polling is the
+    /// pragmatic choice. Cancelled in `disconnect()`.
+    private var paneTitlePollTask: Task<Void, Never>?
+    private static let paneTitlePollInterval: UInt64 = 2_500_000_000 // 2.5s
+
     /// Caller hook for "active pane reported a new render size."
     /// `TmuxBackendSessionView` wires this to its debounced
     /// `scheduleResize` to forward the size to tmux as a PTY
@@ -55,6 +64,60 @@ final class TmuxSessionBackend: SessionBackend {
     /// closure capture.
     func attachShell(_ shell: SSHShellSession?) {
         self.shell = shell
+        if shell != nil {
+            startPaneTitlePolling()
+        }
+    }
+
+    private func startPaneTitlePolling() {
+        paneTitlePollTask?.cancel()
+        paneTitlePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollPaneTitles()
+                try? await Task.sleep(nanoseconds: Self.paneTitlePollInterval)
+            }
+        }
+    }
+
+    /// Fetch `pane_current_command` for every pane the tmux server
+    /// knows about and write the result into `state.paneTitles`.
+    /// Called from the background poll task on a 2.5s cadence.
+    /// Best-effort — failures (transient SSH stalls, mid-attach
+    /// states, etc.) are silently skipped; the next tick retries.
+    private func pollPaneTitles() async {
+        guard let shell, tmux.isAttached else { return }
+        // The literal `T` prefix is critical: tmux's `pane_id` is
+        // formatted as `%0`, `%1`, … and `TmuxCCParser.parseLine`
+        // treats any line starting with `%` as a protocol keyword
+        // (so `%0\tbash` would land in `.unknown(_)` instead of
+        // `.responseLine(_)`, and `runCommand` would never see it).
+        // Prefixing with a non-`%` token sidesteps that without
+        // touching the parser. The token is stripped below.
+        let format = "T\t#{pane_id}\t#{pane_current_command}"
+        do {
+            let lines = try await tmux.runCommand(
+                "list-panes -aF \"\(format)\"\n",
+                write: { try await shell.write($0) }
+            )
+            var newTitles: [Int: String] = [:]
+            for line in lines {
+                let parts = line.split(
+                    separator: "\t",
+                    maxSplits: 2,
+                    omittingEmptySubsequences: false
+                )
+                guard parts.count == 3, parts[0] == "T" else { continue }
+                let raw = String(parts[1])
+                guard raw.hasPrefix("%"), let pid = Int(raw.dropFirst()) else { continue }
+                let cmd = String(parts[2])
+                newTitles[pid] = cmd
+            }
+            if newTitles != state.paneTitles {
+                state.paneTitles = newTitles
+            }
+        } catch {
+            // Best-effort: a single failed poll isn't worth surfacing.
+        }
     }
 
     /// Called after `tmuxSession.handle(event)` processes one
@@ -105,12 +168,15 @@ final class TmuxSessionBackend: SessionBackend {
 
     func disconnect() async {
         FileLogger.shared.log("TmuxBackend.disconnect")
+        paneTitlePollTask?.cancel()
+        paneTitlePollTask = nil
         paneBackends.removeAll()
         shell = nil
         // Caller owns the SSH lifecycle; we just clear state.
         state.windows = []
         state.activeWindowID = nil
         state.isAttached = false
+        state.paneTitles = [:]
     }
 
     func splitPane(direction: SplitDirection, target: Int) async {
@@ -185,9 +251,13 @@ final class TmuxSessionBackend: SessionBackend {
     }
 
     func paneTitle(_ paneID: Int) -> String? {
-        // v1: the tmux pane id. A future pass can subscribe to
-        // `pane_current_command` / `pane_title` via
-        // `refresh-client -B` and surface those.
+        // Polled from tmux's `pane_current_command` (see
+        // `pollPaneTitles`). Falls back to `%<id>` when the cache
+        // hasn't been populated yet (first 0–2.5s after attach,
+        // brand-new panes between polls).
+        if let cached = state.paneTitles[paneID], !cached.isEmpty {
+            return cached
+        }
         return "%\(paneID)"
     }
 

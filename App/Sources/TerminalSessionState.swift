@@ -282,6 +282,13 @@ final class SessionState {
     /// Mirrors tmux's `resize-pane -Z` zoom flag.
     var zoomedPaneID: Int?
 
+    /// Per-pane display title, keyed by `paneID`. The tmux backend
+    /// fills this from `pane_current_command` (polled). The fake
+    /// backend seeds it once at init. Views read via
+    /// `SessionBackend.paneTitle(_:)` which falls back to this
+    /// cache; the @Observable wrapper makes title changes reactive.
+    var paneTitles: [Int: String] = [:]
+
     /// Convenience: the currently-active window, or `nil` if none.
     var activeWindow: WindowInfo? {
         guard let id = activeWindowID else { return nil }

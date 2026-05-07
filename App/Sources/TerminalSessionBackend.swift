@@ -97,5 +97,9 @@ extension SessionBackend {
     func toggleZoom(paneID: Int) async {}
     func movePane(paneID: Int, toWindow windowID: Int) async {}
     func movePane(paneID: Int, toPane targetID: Int, edge: PaneDropEdge) async {}
-    func paneTitle(_ paneID: Int) -> String? { nil }
+    /// Default reads the cached title from `state.paneTitles`. Tmux
+    /// populates the cache via a poll task; the fake backend seeds
+    /// it at init/split. Override only when a backend wants to
+    /// format the title (e.g. add a prefix or suffix).
+    func paneTitle(_ paneID: Int) -> String? { state.paneTitles[paneID] }
 }

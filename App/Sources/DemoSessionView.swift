@@ -608,9 +608,24 @@ struct DemoSessionView: View {
                         }
                     )
                 }
-                .opacity(isActive ? 1.0 : 0.8)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Active/inactive shown via stroke colour and width
+            // (matches the look in `TmuxSessionView`). Previously we
+            // dimmed the inactive pane with `.opacity(0.8)`, but the
+            // 20% transparency let the `paneSeparator` colour bleed
+            // through and the result looked progressively darker
+            // when nested inside multiple splits — the user's "more
+            // splits, more darker" complaint. A border keeps each
+            // pane's terminal colours pixel-identical regardless of
+            // active state or split nesting.
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .strokeBorder(
+                        isActive ? Color.accentColor.opacity(0.6) : Color.gray.opacity(0.25),
+                        lineWidth: isActive ? 2 : 1
+                    )
+            )
             // Identity tied to pane id so SwiftUI doesn't recycle a
             // view onto a different pane's driver during a layout
             // shuffle (split, kill).
