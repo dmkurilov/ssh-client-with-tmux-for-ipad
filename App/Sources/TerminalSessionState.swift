@@ -226,20 +226,94 @@ indirect enum PaneNode: Equatable {
     }
 }
 
+/// One pane's cell rectangle inside a window. `x`, `y`, `cols`,
+/// `rows` are in terminal cells (not points). Pixel coords are
+/// derived once the renderer knows its `CellMetrics`. This carries
+/// what `paneRects` cannot: the *cell weights* tmux assigned to each
+/// pane, so panes render at exactly tmux's grid coordinates instead
+/// of evenly-divided proportions.
+struct PaneCellRect: Equatable {
+    let paneID: Int
+    let x: Int
+    let y: Int
+    let cols: Int
+    let rows: Int
+}
+
+/// Window-wide cell layout: total cell dimensions plus a flat list
+/// of every leaf pane's cell rectangle. Filled by the tmux backend
+/// from `TmuxLayout`; fake backend leaves it nil and the renderer
+/// falls back to proportional sizing.
+struct CellLayout: Equatable {
+    let cols: Int
+    let rows: Int
+    let panes: [PaneCellRect]
+}
+
+/// Recursive cell-grid tree mirroring `TmuxCC.TmuxLayout` but kept
+/// in the App layer so views can consume it without importing
+/// `TmuxCC`. The layout engine walks this to apportion pixels
+/// proportionally and subtract chrome at each split — flat
+/// `CellLayout` doesn't tell us "are these panes side-by-side or
+/// stacked," which we need for chrome accounting.
+struct LayoutCellNode: Equatable {
+    /// Cell counts of this subtree as tmux reports them.
+    let cols: Int
+    let rows: Int
+    let kind: Kind
+
+    indirect enum Kind: Equatable {
+        case leaf(paneID: Int)
+        /// Children placed left-to-right; widths apportioned.
+        case horizontal(children: [LayoutCellNode])
+        /// Children stacked top-to-bottom; heights apportioned.
+        case vertical(children: [LayoutCellNode])
+    }
+
+    /// Flat list of every leaf pane id in render order.
+    var paneIDs: [Int] {
+        switch kind {
+        case .leaf(let pid): return [pid]
+        case .horizontal(let kids), .vertical(let kids):
+            return kids.flatMap { $0.paneIDs }
+        }
+    }
+}
+
 struct WindowInfo: Identifiable, Equatable {
     let id: Int
     var name: String?
     var layout: PaneNode
+    /// tmux-authored per-pane cell coordinates. `nil` when the
+    /// backend doesn't have cell-level info (fake backend, or before
+    /// the first `%layout-change`). When present the renderer sizes
+    /// each pane at exactly `cols × cellW` × `rows × cellH` points
+    /// — which is the whole point of the "tmux owns the grid"
+    /// architecture.
+    var cellLayout: CellLayout?
+    /// Recursive form of `cellLayout` — same data, kept as a tree so
+    /// the layout engine can walk splits and subtract chrome at
+    /// each level. Nil under the same conditions as `cellLayout`.
+    var cellTree: LayoutCellNode?
     var activePaneID: Int?
 
     /// Flat list of pane ids in this window's tree. Read-only —
     /// mutate via `layout`.
     var paneIDs: [Int] { layout.allPaneIDs }
 
-    init(id: Int, name: String? = nil, layout: PaneNode, activePaneID: Int? = nil) {
+    init(
+        id: Int,
+        name: String? = nil,
+        layout: PaneNode,
+        cellLayout: CellLayout? = nil,
+        cellTree: LayoutCellNode? = nil,
+        activePaneID: Int? = nil
+    ) {
         self.id = id
         self.name = name
         self.layout = layout
+        self.cellLayout = cellLayout
+        self.cellTree = cellTree
         self.activePaneID = activePaneID
     }
 }

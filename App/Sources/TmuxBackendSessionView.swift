@@ -34,8 +34,6 @@ struct TmuxBackendSessionView: View {
     @State private var showingAttachPicker = false
     @State private var pendingResize: Task<Void, Never>?
     @State private var lastAppliedSize: (cols: Int, rows: Int)?
-    @State private var captureOnBootstrap: Bool = false
-    @State private var capturedPaneIDs: Set<Int> = []
     /// Set to true when the user explicitly closes the screen so
     /// the pump's stream-end / `.exit` handler doesn't fight the
     /// dismiss by re-presenting the picker.
@@ -147,7 +145,6 @@ struct TmuxBackendSessionView: View {
         shell = nil
         backend = nil
         session.reset()
-        capturedPaneIDs = []
         statusMessage = "session ended — pick another"
 
         guard let conn = connection else {
@@ -272,11 +269,6 @@ struct TmuxBackendSessionView: View {
             FileLogger.shared.log("TmuxBackendView.attach: no connection — abort")
             return
         }
-        switch choice {
-        case .existing: captureOnBootstrap = true
-        case .new: captureOnBootstrap = false
-        }
-        capturedPaneIDs = []
         do {
             if case .existing(let name, true) = choice {
                 FileLogger.shared.log("TmuxBackendView.attach: pre-detach existing client of '\(name)'")
@@ -342,6 +334,24 @@ struct TmuxBackendSessionView: View {
                         backend.didHandle(event)
                         if case .exit = event { exit = true }
                         if case .output(let pid, let payload) = event {
+                            // Hex-log small output bursts and any
+                            // burst containing CR (0x0D) — that's
+                            // the byte that moves cursor to col 0,
+                            // which is the cursor-jump symptom we're
+                            // chasing. Big bursts (vim screen
+                            // renders, etc.) are skipped to keep
+                            // the log readable.
+                            let hasCR = payload.contains(0x0D)
+                            if hasCR || payload.count <= 32 {
+                                let prefix = payload.prefix(64)
+                                let hex = prefix
+                                    .map { String(format: "%02x", $0) }
+                                    .joined()
+                                let suffix = payload.count > 64 ? "…" : ""
+                                FileLogger.shared.log(
+                                    "out %\(pid) \(payload.count)B hex=\(hex)\(suffix)\(hasCR ? " [CR]" : "")"
+                                )
+                            }
                             TranscriptStore.shared.feed(
                                 host: self.host.host,
                                 session: self.session.sessionName ?? "default",
@@ -379,9 +389,15 @@ struct TmuxBackendSessionView: View {
         }
     }
 
-    /// Enumerate windows via `list-windows`, then capture-pane per
-    /// pane in the active window. Same logic as TmuxSessionView,
-    /// minus the legacy `softKeyboard` toolbar plumbing.
+    /// Enumerate windows via `list-windows` so the chrome (tabs +
+    /// active pane) has something to draw against. Per-pane content
+    /// is *not* fetched here anymore — `DemoSessionView` triggers
+    /// `backend.applyGrid` once it knows its pane-area pixel size,
+    /// and that's the single chokepoint that owns capture-pane (via
+    /// the new suspend / `feedSnapshot` / resume sequencing). Doing
+    /// it here too produced the "two prompts" duplication users saw
+    /// at screen-93: capture replayed bytes that live `%output` had
+    /// already pushed.
     private func bootstrapWindows() async {
         guard let shell else { return }
         let format = "#{window_id}\t#{window_active}\t#{window_name}\t#{window_layout}"
@@ -393,42 +409,8 @@ struct TmuxBackendSessionView: View {
             let snaps = lines.compactMap(parseWindowSnapshot)
             session.bootstrap(windows: snaps)
             backend?.syncState()
-
-            if let active = snaps.first(where: { $0.isActive }),
-               let raw = active.layout,
-               let layout = try? TmuxLayout.parse(raw)
-            {
-                for paneID in layout.paneIDs {
-                    await capturePane(paneID: paneID)
-                }
-            }
         } catch {
             // Best-effort.
-        }
-    }
-
-    private func capturePane(paneID: Int) async {
-        guard let shell else { return }
-        guard let driver = session.driver(for: paneID) else { return }
-        if capturedPaneIDs.contains(paneID) { return }
-        if !captureOnBootstrap, driver.bufferedByteCount > 0 { return }
-        do {
-            let lines = try await session.runCommand(
-                "capture-pane -p -e -S - -t %\(paneID)\n",
-                write: { try await shell.write($0) }
-            )
-            guard !lines.isEmpty else { return }
-            var bytes = Data()
-            for (idx, line) in lines.enumerated() {
-                bytes.append(OutputDecoder.decode(line))
-                if idx < lines.count - 1 {
-                    bytes.append(contentsOf: [0x0D, 0x0A])
-                }
-            }
-            driver.feed(bytes)
-            capturedPaneIDs.insert(paneID)
-        } catch {
-            // Capture failure is harmless — the pane just stays empty.
         }
     }
 

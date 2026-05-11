@@ -99,6 +99,17 @@ final class TmuxSession {
         drivers[paneID]
     }
 
+    /// Allocate a new per-pane driver with a `[%paneID]`-prefixed
+    /// logger pre-wired so every `feed` / `bind` lands in the
+    /// shared `debug.log` next to that pane's `out %X` lines.
+    private func makeDriver(for paneID: Int) -> TerminalDriver {
+        let driver = TerminalDriver()
+        driver.log = { msg in
+            FileLogger.shared.log("[%\(paneID)] \(msg)")
+        }
+        return driver
+    }
+
     /// Optimistically set the active pane of `windowID` without
     /// waiting for tmux's `%window-pane-changed`. Used when the user
     /// taps an "inactive" pane in the UI; tmux may not always reply
@@ -236,7 +247,7 @@ final class TmuxSession {
             if let raw = snap.layout, let parsed = try? TmuxLayout.parse(raw) {
                 updateWindow(snap.id) { $0.layout = parsed }
                 for paneID in parsed.paneIDs where drivers[paneID] == nil {
-                    drivers[paneID] = TerminalDriver()
+                    drivers[paneID] = makeDriver(for: paneID)
                     paneIDs.append(paneID)
                 }
             }
@@ -306,7 +317,7 @@ final class TmuxSession {
             // SwiftTermView ahead of the first byte arriving.
             if let parsed {
                 for paneID in parsed.paneIDs where drivers[paneID] == nil {
-                    drivers[paneID] = TerminalDriver()
+                    drivers[paneID] = makeDriver(for: paneID)
                     paneIDs.append(paneID)
                 }
             }
@@ -351,7 +362,7 @@ final class TmuxSession {
             if let existing = drivers[paneID] {
                 driver = existing
             } else {
-                driver = TerminalDriver()
+                driver = makeDriver(for: paneID)
                 drivers[paneID] = driver
                 paneIDs.append(paneID)
             }

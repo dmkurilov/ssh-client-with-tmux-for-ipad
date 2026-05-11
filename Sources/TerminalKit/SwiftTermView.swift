@@ -214,6 +214,8 @@ final class TerminalHost: UIView {
         var unhandled: Set<UIPress> = []
         for press in presses {
             if let bytes = press.key.flatMap(encodeKey) {
+                let hex = bytes.map { String(format: "%02x", $0) }.joined()
+                log?("TerminalHost encodeKey → \(hex) (\(bytes.count)B)")
                 onInput?(Data(bytes))
             } else {
                 unhandled.insert(press)
@@ -307,6 +309,19 @@ public struct SwiftTermView: UIViewRepresentable {
     /// `FileLogger` so FR transitions and HW-key traffic show up
     /// in `debug.log`.
     let onLog: ((String) -> Void)?
+    /// "tmux is the source of truth on grid size." When set, the
+    /// caller has already sized the host view to exactly
+    /// `cols × cellW` × `rows × cellH` points and has told tmux to
+    /// match. SwiftTerm's `sizeChanged` should report `(gridCols,
+    /// gridRows)`; if it doesn't we log a mismatch so we notice
+    /// (e.g. a font change that shifted the cell size). When `nil`,
+    /// we fall back to the legacy "derive cells from frame, tell
+    /// tmux about it" path used by the old `TmuxSessionView`.
+    let gridCols: Int?
+    let gridRows: Int?
+    /// Cell metrics used to size the inner SwiftTerm view exactly.
+    /// Only consulted when `gridCols`/`gridRows` are set.
+    let cellMetrics: CellMetrics?
 
     public init(
         driver: TerminalDriver,
@@ -315,7 +330,10 @@ public struct SwiftTermView: UIViewRepresentable {
         onInput: @escaping (Data) -> Void,
         onSizeChange: @escaping (Int, Int) -> Void = { _, _ in },
         onNavigatePane: ((TerminalNavigationDirection) -> Void)? = nil,
-        onLog: ((String) -> Void)? = nil
+        onLog: ((String) -> Void)? = nil,
+        gridCols: Int? = nil,
+        gridRows: Int? = nil,
+        cellMetrics: CellMetrics? = nil
     ) {
         self.driver = driver
         self.scheme = scheme
@@ -324,6 +342,9 @@ public struct SwiftTermView: UIViewRepresentable {
         self.onSizeChange = onSizeChange
         self.onNavigatePane = onNavigatePane
         self.onLog = onLog
+        self.gridCols = gridCols
+        self.gridRows = gridRows
+        self.cellMetrics = cellMetrics
     }
 
     // The associated `UIViewType` is `UIView` — an erasure that
@@ -337,10 +358,14 @@ public struct SwiftTermView: UIViewRepresentable {
         host.log = onLog
         host.isActivePane = isActive
         context.coordinator.log = onLog
+        context.coordinator.expectedGrid = gridSize
+        if let cellMetrics {
+            host.terminalView.font = cellMetrics.font
+        }
         if let scheme {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
-        onLog?("TerminalHost makeUIView active=\(isActive) id=\(ObjectIdentifier(host).hashValue & 0xFFFF)")
+        onLog?("TerminalHost makeUIView active=\(isActive) gridCols=\(gridCols.map(String.init) ?? "nil") gridRows=\(gridRows.map(String.init) ?? "nil") id=\(ObjectIdentifier(host).hashValue & 0xFFFF)")
         // We *don't* bind the driver here. SwiftTerm computes
         // cols/rows from its frame, and at makeUIView time the
         // frame can still be zero (especially in nested SwiftUI
@@ -352,6 +377,9 @@ public struct SwiftTermView: UIViewRepresentable {
 
     public func updateUIView(_ uiView: UIView, context: Context) {
         guard let host = uiView as? TerminalHost else { return }
+        if let cellMetrics {
+            host.terminalView.font = cellMetrics.font
+        }
         if let scheme {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
         }
@@ -359,12 +387,21 @@ public struct SwiftTermView: UIViewRepresentable {
         host.onNavigatePane = onNavigatePane
         host.log = onLog
         context.coordinator.log = onLog
+        context.coordinator.expectedGrid = gridSize
         context.coordinator.wantsKeyboard = isActive
         // FR is driven by `isActivePane`'s didSet — assigning here
         // flips first responder atomically to whichever pane is
         // newly active, in a single hop, without a window of "no
         // FR" or "two FR claims racing" between mount events.
         host.isActivePane = isActive
+    }
+
+    /// Convenience: pack `(gridCols, gridRows)` into a tuple when
+    /// both are set, `nil` otherwise. Used so the coordinator can
+    /// hold one optional rather than two.
+    private var gridSize: (cols: Int, rows: Int)? {
+        guard let c = gridCols, let r = gridRows else { return nil }
+        return (c, r)
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -377,6 +414,13 @@ public struct SwiftTermView: UIViewRepresentable {
         let onSizeChange: (Int, Int) -> Void
         private var hasBound = false
         var log: ((String) -> Void)?
+        /// What we *told* tmux (and SwiftTerm, indirectly via frame)
+        /// the grid should be. When set, every `sizeChanged` from
+        /// SwiftTerm is checked against this — a mismatch means our
+        /// "tmux owns the grid size" invariant has slipped (font
+        /// changed, frame rounded weirdly, etc.) and we want a log
+        /// line right when it happens, not three reattaches later.
+        var expectedGrid: (cols: Int, rows: Int)?
         /// Mirror of the parent's `isActive` so `sizeChanged` (which
         /// fires once the view has a real size, i.e. is in the window
         /// hierarchy) can perform the initial first-responder claim.
@@ -401,11 +445,29 @@ public struct SwiftTermView: UIViewRepresentable {
         /// path that might fire it (paste handling, accessibility,
         /// etc.).
         public func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
-            log?("STV.send \(data.count) bytes (unexpected — host should own FR)")
+            let hex = data.map { String(format: "%02x", $0) }.joined()
+            log?("STV.send \(data.count) bytes hex=\(hex) (unexpected — host should own FR)")
             onInput(Data(data))
         }
 
         public func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
+            // The renderer's own report of its grid size. This is the
+            // ground truth for "what dimensions does SwiftTerm think
+            // it has" — the bytes we feed are interpreted against
+            // these cells. Frame is the UIView frame at the moment of
+            // the report, useful for spotting layout-not-settled-yet
+            // cases (e.g. a width-1 grid coming from a near-zero
+            // frame at first mount).
+            let f = source.frame
+            log?("sizeChanged cols=\(newCols) rows=\(newRows) frame=\(Int(f.width.rounded()))x\(Int(f.height.rounded())) bound=\(hasBound)")
+            // Sanity: when we asked tmux for a specific grid size and
+            // sized our view to match, SwiftTerm should report that
+            // exact grid. If it doesn't, something rounded weirdly
+            // (font cell size disagreement, sub-point frame, etc.)
+            // and we want to know right when it happens.
+            if let expected = expectedGrid, expected.cols != newCols || expected.rows != newRows {
+                log?("sizeChanged MISMATCH expected=\(expected.cols)x\(expected.rows) actual=\(newCols)x\(newRows)")
+            }
             // First plausible size triggers the buffer replay. Use a
             // small threshold so a transient `(2, 2)` from an early
             // layout pass doesn't lock us into wrap-each-char mode.
@@ -416,6 +478,7 @@ public struct SwiftTermView: UIViewRepresentable {
                     driver.bind(source)
                 }
                 hasBound = true
+                log?("sizeChanged bound driver at cols=\(newCols) rows=\(newRows)")
             }
             onSizeChange(newCols, newRows)
         }

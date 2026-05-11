@@ -46,6 +46,7 @@ final class TmuxSessionBackend: SessionBackend {
     private var paneTitlePollTask: Task<Void, Never>?
     private static let paneTitlePollInterval: UInt64 = 2_500_000_000 // 2.5s
 
+
     /// Caller hook for "active pane reported a new render size."
     /// `TmuxBackendSessionView` wires this to its debounced
     /// `scheduleResize` to forward the size to tmux as a PTY
@@ -66,6 +67,14 @@ final class TmuxSessionBackend: SessionBackend {
         self.shell = shell
         if shell != nil {
             startPaneTitlePolling()
+            // Tell tmux to think of the client as a generous size,
+            // larger than any realistic iPad pane area in cells.
+            // This decouples the SSH PTY size (which we set to the
+            // active pane's dimensions for terminal-control reasons)
+            // from tmux's layout calculations: with a big client,
+            // any `resize-pane` we issue afterwards fits without
+            // tmux rejecting it for being larger than the client.
+            Task { await write("refresh-client -C 240x80\n") }
         }
     }
 
@@ -142,6 +151,8 @@ final class TmuxSessionBackend: SessionBackend {
                 id: win.id,
                 name: win.name,
                 layout: layout(for: win),
+                cellLayout: win.layout.map { self.cellLayout(for: $0) },
+                cellTree: win.layout.map { self.cellTree(for: $0) },
                 activePaneID: win.activePaneID
             )
         }
@@ -261,6 +272,197 @@ final class TmuxSessionBackend: SessionBackend {
         return "%\(paneID)"
     }
 
+    // MARK: - Grid handshake
+
+    /// Tell tmux the window grid we want and re-capture every pane's
+    /// content from tmux's authoritative grid afterwards. This is
+    /// the single chokepoint for "view geometry changed" in the new
+    /// architecture: instead of `sizeChanged → resize-pane` per pane
+    /// (which races bash's pty width), we propose one window size
+    /// here, tmux reflows internally, and we read its grid back.
+    ///
+    /// Sequence on the wire:
+    /// 1. `refresh-client -C cols x rows` — sets the client's view
+    ///    bounds, so subsequent resize-window can fit.
+    /// 2. `resize-window -t @WID -x cols -y rows` for the active
+    ///    window — tmux re-flows the layout.
+    /// 3. `list-windows -F …` to pull the new layout (per-pane
+    ///    cell sizes).
+    /// 4. For each pane in the active window: suspend its driver,
+    ///    `capture-pane -p -e`, query cursor position, replace the
+    ///    SwiftTerm grid with the snapshot, resume.
+    ///
+    /// Apply per-pane sizes computed by `PaneLayoutEngine`. For
+    /// each pane whose current `pane_width × pane_height` (per
+    /// tmux's last `%layout-change`) disagrees with the engine's
+    /// request, issue `resize-pane -t %X -x C -y R`. After all
+    /// resizes, re-fetch the layout and recapture every pane in
+    /// the active window. This is the per-pane analogue of
+    /// `applyGrid`, but driven by what the chrome can actually
+    /// fit — chrome-subtracted apportionment up front, exact
+    /// targets to tmux at the end.
+    func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async {
+        guard let shell, !entries.isEmpty else { return }
+        FileLogger.shared.log("TmuxBackend.applyPaneLayout entries=\(entries.count)")
+        // Build a lookup of tmux's current per-pane sizes so we
+        // only resize panes that disagree. Saves bandwidth and
+        // avoids tmux re-flowing on no-ops.
+        var currentSize: [Int: (cols: Int, rows: Int)] = [:]
+        if let activeWid = state.activeWindowID,
+           let win = tmux.windows.first(where: { $0.id == activeWid }),
+           let layout = win.layout
+        {
+            collectCurrentSizes(layout, into: &currentSize)
+        }
+        var changed = false
+        for entry in entries {
+            let current = currentSize[entry.paneID]
+            guard current?.cols != entry.cols || current?.rows != entry.rows else {
+                continue
+            }
+            await write("resize-pane -t %\(entry.paneID) -x \(entry.cols) -y \(entry.rows)\n")
+            changed = true
+        }
+        if changed {
+            await refreshActiveWindowLayout(shell: shell)
+        }
+        // Recapture every pane in the active window so SwiftTerm's
+        // grid content matches tmux's post-resize grid content.
+        if let activeWid = state.activeWindowID,
+           let win = tmux.windows.first(where: { $0.id == activeWid }),
+           let layout = win.layout
+        {
+            for paneID in layout.paneIDs {
+                await recapturePane(paneID: paneID)
+            }
+        }
+    }
+
+    /// Walk a `TmuxLayout` and record every leaf's `(cols, rows)`.
+    /// Used by `applyPaneLayout` to decide which panes actually
+    /// need a `resize-pane` command.
+    private func collectCurrentSizes(
+        _ layout: TmuxLayout,
+        into out: inout [Int: (cols: Int, rows: Int)]
+    ) {
+        switch layout.node {
+        case .leaf(let pid):
+            out[pid] = (layout.cols, layout.rows)
+        case .horizontal(let kids), .vertical(let kids):
+            for kid in kids { collectCurrentSizes(kid, into: &out) }
+        }
+    }
+
+    func applyGrid(cols: Int, rows: Int) async {
+        guard cols > 0, rows > 0, let shell else { return }
+        FileLogger.shared.log("TmuxBackend.applyGrid request \(cols)x\(rows)")
+        await write("refresh-client -C \(cols)x\(rows)\n")
+        // First-call race: DemoSessionView may fire `applyGrid`
+        // before tmux's `%session-window-changed` has populated
+        // `state.activeWindowID`. If so, refresh layout once to
+        // learn it, then issue the resize and refresh again.
+        if state.activeWindowID == nil {
+            await refreshActiveWindowLayout(shell: shell)
+        }
+        if let activeWid = state.activeWindowID {
+            await write("resize-window -t @\(activeWid) -x \(cols) -y \(rows)\n")
+            // Pull the post-resize layout so per-pane cell sizes are
+            // current. tmux honors what fits; if our request was
+            // bigger than the SSH pty allows it'll silently round
+            // down — the layout we read back is the authoritative
+            // answer.
+            await refreshActiveWindowLayout(shell: shell)
+        }
+        if let activeWid = state.activeWindowID,
+           let win = tmux.windows.first(where: { $0.id == activeWid }),
+           let layout = win.layout
+        {
+            for paneID in layout.paneIDs {
+                await recapturePane(paneID: paneID)
+            }
+        }
+    }
+
+    /// Re-read `list-windows` to refresh the active window's layout
+    /// in `TmuxSession.windows`. Used after we issue a `resize-window`
+    /// to learn the new per-pane cell sizes tmux assigned.
+    private func refreshActiveWindowLayout(shell: SSHShellSession) async {
+        let format = "#{window_id}\t#{window_active}\t#{window_name}\t#{window_layout}"
+        do {
+            let lines = try await tmux.runCommand(
+                "list-windows -F \"\(format)\"\n",
+                write: { try await shell.write($0) }
+            )
+            var snapshots: [TmuxSession.WindowSnapshot] = []
+            for line in lines {
+                let parts = line.split(separator: "\t", maxSplits: 3, omittingEmptySubsequences: false)
+                guard parts.count >= 2 else { continue }
+                let raw = String(parts[0])
+                guard raw.hasPrefix("@"), let wid = Int(raw.dropFirst()) else { continue }
+                let isActive = (parts.count > 1) && (parts[1] == "1")
+                let name = parts.count > 2 ? String(parts[2]) : nil
+                let layout = parts.count > 3 ? String(parts[3]) : nil
+                snapshots.append(TmuxSession.WindowSnapshot(id: wid, name: name, isActive: isActive, layout: layout))
+            }
+            if !snapshots.isEmpty {
+                tmux.bootstrap(windows: snapshots)
+                syncState()
+            }
+        } catch {
+            FileLogger.shared.log("TmuxBackend.refreshActiveWindowLayout: \(error)")
+        }
+    }
+
+    /// Re-capture one pane from tmux's grid into SwiftTerm's grid.
+    /// Suspends the driver so any `%output` arriving during the
+    /// capture round-trip is dropped (those bytes are already in
+    /// the snapshot — feeding them again would render the same
+    /// content twice). On success, replaces the SwiftTerm grid
+    /// content with the captured snapshot + cursor positioning.
+    func recapturePane(paneID: Int) async {
+        guard let shell, let driver = tmux.driver(for: paneID) else { return }
+        FileLogger.shared.log("[%\(paneID)] recapturePane begin")
+        driver.suspend()
+        do {
+            let captureLines = try await tmux.runCommand(
+                "capture-pane -p -e -S - -t %\(paneID)\n",
+                write: { try await shell.write($0) }
+            )
+            // Cursor position lives on a separate query because
+            // capture-pane doesn't transfer it. Best-effort: if it
+            // fails, skip cursor positioning rather than dropping
+            // the whole snapshot.
+            let cursorLines = (try? await tmux.runCommand(
+                "display-message -p -t %\(paneID) \"C\t#{cursor_x}\t#{cursor_y}\"\n",
+                write: { try await shell.write($0) }
+            )) ?? []
+            var bytes = Data()
+            for (idx, line) in captureLines.enumerated() {
+                bytes.append(OutputDecoder.decode(line))
+                if idx < captureLines.count - 1 {
+                    bytes.append(contentsOf: [0x0D, 0x0A])
+                }
+            }
+            // Position cursor: tmux's coords are 0-based, ANSI's
+            // CUP is 1-based. Output: `ESC[<row+1>;<col+1>H`.
+            for line in cursorLines {
+                let parts = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+                guard parts.count == 3, parts[0] == "C",
+                      let col = Int(parts[1]), let row = Int(parts[2])
+                else { continue }
+                let move = "\u{1B}[\(row + 1);\(col + 1)H"
+                bytes.append(Data(move.utf8))
+                break
+            }
+            driver.feedSnapshot(bytes)
+            driver.resumeDiscardingPending()
+            FileLogger.shared.log("[%\(paneID)] recapturePane done snapshot=\(bytes.count)B")
+        } catch {
+            FileLogger.shared.log("[%\(paneID)] recapturePane FAILED \(error) — flushing buffered live")
+            driver.resumeFlushingPending()
+        }
+    }
+
     // MARK: - Internals
 
     /// Convert a window's `TmuxLayout?` (topology + cell sizes)
@@ -294,6 +496,43 @@ final class TmuxSessionBackend: SessionBackend {
         }
     }
 
+    /// Flatten a `TmuxLayout` into the per-pane cell rectangles the
+    /// renderer needs. tmux's layout already carries `(x, y, cols,
+    /// rows)` for every node; we just collect the leaves.
+    private func cellLayout(for layout: TmuxLayout) -> CellLayout {
+        var panes: [PaneCellRect] = []
+        collectPanes(layout, into: &panes)
+        return CellLayout(cols: layout.cols, rows: layout.rows, panes: panes)
+    }
+
+    private func collectPanes(_ layout: TmuxLayout, into out: inout [PaneCellRect]) {
+        switch layout.node {
+        case .leaf(let pid):
+            out.append(PaneCellRect(
+                paneID: pid,
+                x: layout.x, y: layout.y,
+                cols: layout.cols, rows: layout.rows
+            ))
+        case .horizontal(let kids), .vertical(let kids):
+            for kid in kids { collectPanes(kid, into: &out) }
+        }
+    }
+
+    /// Convert `TmuxLayout` (TmuxCC module) into the App-side
+    /// `LayoutCellNode` tree that the layout engine consumes.
+    private func cellTree(for layout: TmuxLayout) -> LayoutCellNode {
+        let kind: LayoutCellNode.Kind
+        switch layout.node {
+        case .leaf(let pid):
+            kind = .leaf(paneID: pid)
+        case .horizontal(let kids):
+            kind = .horizontal(children: kids.map(cellTree(for:)))
+        case .vertical(let kids):
+            kind = .vertical(children: kids.map(cellTree(for:)))
+        }
+        return LayoutCellNode(cols: layout.cols, rows: layout.rows, kind: kind)
+    }
+
     /// Write a tmux command line on the SSH control channel.
     /// Idempotent if no shell — silently drops, useful during
     /// connection setup races.
@@ -315,13 +554,22 @@ final class TmuxSessionBackend: SessionBackend {
         try? await shell.write(Data(cmd.utf8))
     }
 
-    /// Forward a per-pane resize event up to the
-    /// `onActivePaneResize` hook *if* this is the currently
-    /// active pane. Background-pane size events are noise — the
-    /// active pane is the only one that should drive PTY resize.
+    /// SwiftTerm reported a render size for `paneID`. In the new
+    /// architecture (tmux is the source of truth on grid size) this
+    /// is purely a sanity-check signal — we already told tmux the
+    /// grid we want and sized the pane view to match, so a report
+    /// here that disagrees with what we asked for indicates either a
+    /// font cell rounding issue or a layout race we want to see.
+    /// We *do* still forward the active pane's size to the SSH PTY
+    /// resize path, because the outer SSH PTY must be at least as
+    /// big as the active pane for tmux to be willing to render at
+    /// our requested size.
     fileprivate func paneResized(paneID: Int, cols: Int, rows: Int) {
-        guard let activePID = state.activePaneID, activePID == paneID else { return }
-        onActivePaneResize?(cols, rows)
+        guard cols > 0, rows > 0 else { return }
+        FileLogger.shared.log("[%\(paneID)] paneResized cols=\(cols) rows=\(rows) (informational; resize-pane no longer driven from SwiftTerm)")
+        if let activePID = state.activePaneID, activePID == paneID {
+            onActivePaneResize?(cols, rows)
+        }
     }
 
     private func shellEscape(_ s: String) -> String {

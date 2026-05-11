@@ -80,6 +80,24 @@ protocol SessionBackend: AnyObject {
     /// backend has nothing useful to offer; the view falls back to
     /// `%<id>`.
     func paneTitle(_ paneID: Int) -> String?
+
+    /// Push a window grid size to the backend's source of truth and
+    /// recapture every pane's grid into our local renderer. The
+    /// only caller is the chrome (`DemoSessionView`) once it has
+    /// measured its pane area — the backend is then responsible for
+    /// telling tmux (or whatever underlies it) about the new grid
+    /// and reconciling the local grids to match. Default no-op so
+    /// non-tmux backends (the fake echo, future SSH-only) can
+    /// ignore it.
+    func applyGrid(cols: Int, rows: Int) async
+
+    /// Push *per-pane* target cell sizes derived by
+    /// `PaneLayoutEngine`. Each tuple is `(paneID, cellCols,
+    /// cellRows)`. The backend issues `resize-pane` only for panes
+    /// whose current size disagrees with the request, then runs
+    /// the recapture sequence. Default no-op for backends without
+    /// a notion of pane sizing.
+    func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async
 }
 
 /// No-op default implementations so backends only override what
@@ -102,4 +120,6 @@ extension SessionBackend {
     /// it at init/split. Override only when a backend wants to
     /// format the title (e.g. add a prefix or suffix).
     func paneTitle(_ paneID: Int) -> String? { state.paneTitles[paneID] }
+    func applyGrid(cols: Int, rows: Int) async {}
+    func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async {}
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import ColorSchemes
 
 /// App-wide settings sheet. Currently just a color-scheme picker —
@@ -10,6 +11,7 @@ struct SettingsSheet: View {
 
     @State private var addingKey = false
     @State private var showingDemo = false
+    @State private var buildCopied = false
     @Bindable private var transcripts = TranscriptStore.shared
     @Bindable private var fileLogger = FileLogger.shared
     @Bindable private var consent = RecordingConsent.shared
@@ -98,17 +100,30 @@ struct SettingsSheet: View {
                 }
 
                 Section {
-                    HStack {
-                        Text("Build")
-                        Spacer()
-                        Text(BuildInfo.signature)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.trailing)
-                            .textSelection(.enabled)
+                    Button {
+                        UIPasteboard.general.string = BuildInfo.signature
+                        buildCopied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            buildCopied = false
+                        }
+                    } label: {
+                        HStack {
+                            Text("Build")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text(BuildInfo.signature)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                                .textSelection(.enabled)
+                            Image(systemName: buildCopied ? "checkmark" : "doc.on.doc")
+                                .font(.caption)
+                                .foregroundStyle(buildCopied ? Color.green : Color.secondary)
+                        }
                     }
+                    .buttonStyle(.plain)
                 } footer: {
-                    Text("Hand-bumped tag in `App/Sources/BuildInfo.swift`. Compare with the value in your working repo to confirm a code change is on the device.")
+                    Text("Tap to copy. Hand-bumped tag in `App/Sources/BuildInfo.swift`. Compare with the value in your working repo to confirm a code change is on the device.")
                 }
             }
             .navigationTitle("Settings")

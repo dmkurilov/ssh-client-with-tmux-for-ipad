@@ -68,6 +68,57 @@ struct DemoSessionView: View {
     /// failed nav attempt and cleared by a delayed `Task`.
     @State private var paneNavBlink: Bool = false
 
+    /// Cell metrics for this session — measured once from the
+    /// default monospace font. Drives the "tmux owns the grid"
+    /// invariant: pane area pixel size ÷ `cellMetrics` = the cell
+    /// grid we ask tmux to use; per-pane pixel sizes = pane cell
+    /// counts × `cellMetrics`.
+    @State private var cellMetrics: CellMetrics = .defaultMetrics()
+
+    /// Minimum cell counts for a pane after split. iTerm2 uses
+    /// similar values; the goal is a pane that's still usable for
+    /// at least a shell prompt + one line of feedback.
+    private static let minPaneCols = 20
+    private static let minPaneRows = 5
+
+    /// `true` iff splitting `paneID` along `direction` would leave
+    /// both halves at or above the minimum cell counts. Used to
+    /// disable split actions before they hit tmux. When we don't
+    /// have a cell layout (fake backend, brief window before the
+    /// first `%layout-change`), we permit the split — tmux will
+    /// reject if it really doesn't fit.
+    private func canSplit(paneID: Int, direction: SplitDirection) -> Bool {
+        guard let cellLayout = backend.state.activeWindow?.cellLayout,
+              let pane = cellLayout.panes.first(where: { $0.paneID == paneID })
+        else {
+            return true
+        }
+        switch direction {
+        case .horizontal:
+            // Side-by-side: each half needs minCols. +1 cell for
+            // the divider tmux inserts between panes.
+            return pane.cols >= 2 * Self.minPaneCols + 1
+        case .vertical:
+            return pane.rows >= 2 * Self.minPaneRows + 1
+        }
+    }
+
+    /// Last engine output we sent to the backend. Tracked so we
+    /// don't churn applyPaneLayout when nothing changed — keys are
+    /// `(paneID, cellCols, cellRows)`, equality means "no resize
+    /// needed."
+    @State private var lastLayoutEntries: [PaneFinalLayout] = []
+    /// `true` once we've confirmed tmux's layout reflects a request
+    /// we made. Until then the pane area shows a small spinner so
+    /// we don't paint stale-grid content from before the handshake.
+    @State private var gridReady: Bool = false
+    /// Most recent computed engine layout (per-pane pixel rects +
+    /// hidden flag). Recomputed on pane-area-size or `cellTree`
+    /// change. Empty if the backend hasn't sent a tree yet.
+    @State private var paneFinalLayouts: [PaneFinalLayout] = []
+    /// Measured pane-area pixel size from the inner GeometryReader.
+    @State private var paneAreaSize: CGSize = .zero
+
     // `HardwareKeyboardObserver.shared` informs the initial
     // `specialKeysVisible` default. After mount, the user owns the
     // toggle; we don't auto-flip on connect/disconnect to avoid
@@ -394,68 +445,20 @@ struct DemoSessionView: View {
     @ViewBuilder
     private var paneContent: some View {
         if let win = backend.state.activeWindow, !win.paneIDs.isEmpty {
-            if let zoomed = backend.state.zoomedPaneID, win.paneIDs.contains(zoomed) {
-                // Zoomed: only the zoomed pane fills the area, no
-                // control bar. User exits zoom via `⌘⇧Enter` or the
-                // pane menu (still reachable when un-zoomed).
-                paneCell(paneID: zoomed, isActive: !paneNavBlink, showControlBar: false)
-            } else {
-                // Flat treemap layout: compute each pane's frame
-                // from the split tree, render everything in one
-                // ZStack keyed by paneID. This keeps SwiftUI from
-                // destroying a pane's `TerminalHost` whenever its
-                // parent's shape changes (e.g. leaf %2 turning into
-                // `[vertical: %2, %3]` when split). The HStack/
-                // VStack-recursion approach we used before rebuilt
-                // every nested view on each layout edit, which
-                // leaked stale TerminalHosts and broke key input
-                // routing.
-                //
-                // `paneNavBlink` overrides the active pane id with
-                // nil so every pane renders as inactive — the brief
-                // "can't go there" feedback for `⌘⌥+arrow`.
-                GeometryReader { geo in
-                    let entries: [PaneLayoutEntry] = win.layout
-                        .paneRects(in: CGRect(origin: .zero, size: geo.size))
-                        .map { PaneLayoutEntry(id: $0.id, frame: $0.frame) }
-                    let active = paneNavBlink ? nil : win.activePaneID
-                    ZStack(alignment: .topLeading) {
-                        // `paneSeparator` doubles as: (a) an anchor
-                        // that expands the ZStack to the full geo
-                        // size, and (b) the visible 1pt strip
-                        // between adjacent panes, shown through
-                        // each paneCell's `.insetBy` gap. Same role
-                        // the HStack/VStack `spacing: 1
-                        // .background(paneSeparator)` played in the
-                        // old recursive renderer.
-                        paneSeparator
-                        ForEach(entries) { entry in
-                            let f = entry.frame.insetBy(dx: 0.5, dy: 0.5)
-                            // `.position` (centre-based, absolute)
-                            // not `.offset` (visual-only). `.offset`
-                            // leaves the view's *layout* origin at
-                            // (0,0) — every paneCell ends up laid
-                            // out on top of every other one, only
-                            // their rendered pixels differ. UIKit
-                            // hit-testing and key-event routing use
-                            // the underlying UIView frames, so
-                            // overlapping layouts caused stale
-                            // first-responder dispatch on inactive
-                            // panes. `.position` writes the real
-                            // frame into the UIView, so the
-                            // responder chain matches what the user
-                            // sees.
-                            paneCell(paneID: entry.id, isActive: entry.id == active)
-                                .frame(width: f.width, height: f.height)
-                                .position(x: f.midX, y: f.midY)
-                        }
+            GeometryReader { geo in
+                paneAreaContent(window: win, area: geo.size)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                    .onAppear {
+                        paneAreaSize = geo.size
+                        syncLayoutFromEngine(window: win)
                     }
-                    .frame(
-                        width: geo.size.width,
-                        height: geo.size.height,
-                        alignment: .topLeading
-                    )
-                }
+                    .onChange(of: geo.size) { _, new in
+                        paneAreaSize = new
+                        syncLayoutFromEngine(window: win)
+                    }
+                    .onChange(of: win.cellTree) { _, _ in
+                        syncLayoutFromEngine(window: win)
+                    }
             }
         } else {
             VStack(spacing: 8) {
@@ -468,6 +471,133 @@ struct DemoSessionView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// Re-run `PaneLayoutEngine` against the current pane area + the
+    /// active window's tmux-authored cell tree. If the engine's
+    /// per-pane decisions differ from what we last sent, ship the
+    /// new sizes to the backend (which will issue per-pane
+    /// `resize-pane` and recapture). Idempotent — repeated calls
+    /// with no state change are silent.
+    private func syncLayoutFromEngine(window win: WindowInfo) {
+        guard paneAreaSize.width > 0, paneAreaSize.height > 0 else { return }
+        guard let tree = win.cellTree else {
+            // No tree yet (mid-attach, or fake backend). Mark
+            // gridReady so the spinner clears for the fallback
+            // proportional renderer; nothing else to do.
+            if !gridReady { gridReady = true }
+            return
+        }
+        let layouts = PaneLayoutEngine.layout(
+            tree: tree,
+            area: paneAreaSize,
+            cellMetrics: cellMetrics
+        )
+        paneFinalLayouts = layouts
+        // Only send to tmux if the per-pane (cols, rows) decision
+        // changed since last send. Compare on the cell-grid keys
+        // the backend cares about, ignoring pixel rects.
+        struct LayoutKey: Equatable {
+            let paneID: Int
+            let cols: Int
+            let rows: Int
+            let hidden: Bool
+        }
+        let nowKeys = layouts.map {
+            LayoutKey(paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows, hidden: $0.hidden)
+        }
+        let prevKeys = lastLayoutEntries.map {
+            LayoutKey(paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows, hidden: $0.hidden)
+        }
+        if nowKeys != prevKeys {
+            lastLayoutEntries = layouts
+            let entries = layouts.map { (paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows) }
+            FileLogger.shared.log("Demo: engine produced \(entries.count) panes — \(entries.map { "%\($0.paneID)=\($0.cols)x\($0.rows)" }.joined(separator: " "))")
+            gridReady = false
+            Task {
+                await backend.applyPaneLayout(entries)
+                await MainActor.run { self.gridReady = true }
+            }
+        } else if !gridReady {
+            // Engine confirms tmux state matches last send.
+            gridReady = true
+        }
+    }
+
+    @ViewBuilder
+    private func paneAreaContent(window win: WindowInfo, area: CGSize) -> some View {
+        if !gridReady {
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Sizing terminal…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: area.width, height: area.height)
+        } else if let zoomed = backend.state.zoomedPaneID, win.paneIDs.contains(zoomed) {
+            paneCell(
+                paneID: zoomed,
+                isActive: !paneNavBlink,
+                showControlBar: false,
+                cellRect: nil,
+                fallbackPixelSize: area
+            )
+        } else if !paneFinalLayouts.isEmpty {
+            engineDrivenPanes(window: win, area: area)
+        } else {
+            // Engine hasn't produced output yet (no cell tree from
+            // backend — fake backend, or first frame on attach).
+            // Fall back to the legacy proportional renderer.
+            proportionalPanes(window: win, area: area)
+        }
+    }
+
+    @ViewBuilder
+    private func engineDrivenPanes(window win: WindowInfo, area: CGSize) -> some View {
+        let active = paneNavBlink ? nil : win.activePaneID
+        ZStack(alignment: .topLeading) {
+            paneSeparator
+            ForEach(paneFinalLayouts.filter { !$0.hidden }, id: \.paneID) { p in
+                let outer = p.outerRect
+                let rect = PaneCellRect(
+                    paneID: p.paneID,
+                    x: 0, y: 0,
+                    cols: p.cellCols, rows: p.cellRows
+                )
+                paneCell(
+                    paneID: p.paneID,
+                    isActive: p.paneID == active,
+                    cellRect: rect,
+                    fallbackPixelSize: outer.size
+                )
+                .frame(width: outer.width, height: outer.height)
+                .position(x: outer.midX, y: outer.midY)
+            }
+        }
+        .frame(width: area.width, height: area.height, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func proportionalPanes(window win: WindowInfo, area: CGSize) -> some View {
+        let entries: [PaneLayoutEntry] = win.layout
+            .paneRects(in: CGRect(origin: .zero, size: area))
+            .map { PaneLayoutEntry(id: $0.id, frame: $0.frame) }
+        let active = paneNavBlink ? nil : win.activePaneID
+        ZStack(alignment: .topLeading) {
+            paneSeparator
+            ForEach(entries) { entry in
+                let f = entry.frame.insetBy(dx: 0.5, dy: 0.5)
+                paneCell(
+                    paneID: entry.id,
+                    isActive: entry.id == active,
+                    cellRect: nil,
+                    fallbackPixelSize: f.size
+                )
+                .frame(width: f.width, height: f.height)
+                .position(x: f.midX, y: f.midY)
+            }
+        }
+        .frame(width: area.width, height: area.height, alignment: .topLeading)
     }
 
     /// Inline search bar shown above the pane area when the user
@@ -553,11 +683,25 @@ struct DemoSessionView: View {
     }
 
     @ViewBuilder
-    private func paneCell(paneID: Int, isActive: Bool, showControlBar: Bool = true) -> some View {
+    private func paneCell(
+        paneID: Int,
+        isActive: Bool,
+        showControlBar: Bool = true,
+        cellRect: PaneCellRect? = nil,
+        fallbackPixelSize: CGSize? = nil
+    ) -> some View {
         if let pane = backend.pane(paneID) {
             VStack(spacing: 0) {
                 if showControlBar {
+                    // Force the chrome's pixel budget so the layout
+                    // engine's outerRect = controlPanel + cellGrid
+                    // matches what we actually paint. Without this
+                    // the bar's intrinsic height drifts ±2pt from
+                    // `LayoutChrome.controlPanelPt` and the cell
+                    // area absorbs the drift, producing
+                    // off-by-one-row sizeChanged MISMATCH reports.
                     paneControlBar(paneID: paneID, isActive: isActive)
+                        .frame(height: LayoutChrome.default.controlPanelPt)
                 }
                 ZStack {
                     SwiftTermView(
@@ -568,6 +712,12 @@ struct DemoSessionView: View {
                             Task { await pane.send(data) }
                         },
                         onSizeChange: { cols, rows in
+                            // Informational only — the grid is
+                            // driven top-down by the layout
+                            // engine + applyPaneLayout. We still
+                            // forward to the backend so the SSH
+                            // PTY can stay synced to the active
+                            // pane's size.
                             Task { await pane.resize(cols: cols, rows: rows) }
                         },
                         onNavigatePane: { dir in
@@ -575,7 +725,10 @@ struct DemoSessionView: View {
                         },
                         onLog: { msg in
                             FileLogger.shared.log("Demo[%\(paneID)] \(msg)")
-                        }
+                        },
+                        gridCols: cellRect?.cols,
+                        gridRows: cellRect?.rows,
+                        cellMetrics: cellRect != nil ? cellMetrics : nil
                     )
                     .disabled(!isActive)
                     if !isActive {
@@ -683,12 +836,14 @@ struct DemoSessionView: View {
                 } label: {
                     Label("Split pane vertically", systemImage: "rectangle.split.2x1")
                 }
+                .disabled(!canSplit(paneID: paneID, direction: .horizontal))
                 Button {
                     Task { await backend.splitPane(direction: .vertical, target: paneID) }
                     FileLogger.shared.log("Demo: pane split ↓ %\(paneID)")
                 } label: {
                     Label("Split pane horizontally", systemImage: "rectangle.split.1x2")
                 }
+                .disabled(!canSplit(paneID: paneID, direction: .vertical))
                 Button {
                     Task { await backend.toggleZoom(paneID: paneID) }
                     FileLogger.shared.log("Demo: pane zoom toggle %\(paneID)")
@@ -828,14 +983,18 @@ struct DemoSessionView: View {
             .keyboardShortcut("t", modifiers: [.command, .shift])
 
             Button("Split right") {
-                guard let target = backend.state.activePaneID else { return }
+                guard let target = backend.state.activePaneID,
+                      canSplit(paneID: target, direction: .horizontal)
+                else { return }
                 Task { await backend.splitPane(direction: .horizontal, target: target) }
                 FileLogger.shared.log("Demo: ⌘D split-right")
             }
             .keyboardShortcut("d", modifiers: .command)
 
             Button("Split down") {
-                guard let target = backend.state.activePaneID else { return }
+                guard let target = backend.state.activePaneID,
+                      canSplit(paneID: target, direction: .vertical)
+                else { return }
                 Task { await backend.splitPane(direction: .vertical, target: target) }
                 FileLogger.shared.log("Demo: ⌘⇧D split-down")
             }
