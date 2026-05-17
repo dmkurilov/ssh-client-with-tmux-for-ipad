@@ -4,7 +4,6 @@ import TerminalKit
 @main
 struct SSHClientTmuxApp: App {
     init() {
-        _ = HardwareKeyboardObserver.shared
         // Build-version stamp at the top of every debug.log run —
         // gated on the user's consent toggle so the file stays
         // empty until they explicitly opt in. Lets future bug

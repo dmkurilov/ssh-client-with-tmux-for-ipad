@@ -31,13 +31,6 @@ struct DemoSessionView: View {
 
     @State private var fullScreen: Bool = false
     @State private var tabsVisible: Bool = true
-    /// One-axis toggle for the slim accessory bar (Esc/Tab/arrows
-    /// /`|`/prefix). Defaults to *off when a HW keyboard is
-    /// attached* (the user has Esc/Tab/etc. on real keys already)
-    /// and *on otherwise*. User can flip via the `kb` toolbar
-    /// button.
-    @State private var specialKeysVisible: Bool = !HardwareKeyboardObserver.shared.isAttached
-
     @State private var renamingWindowID: Int?
     @State private var renameText: String = ""
     @State private var renamingSession: Bool = false
@@ -132,11 +125,6 @@ struct DemoSessionView: View {
         let layouts: [PaneFinalLayout]
     }
 
-    // `HardwareKeyboardObserver.shared` informs the initial
-    // `specialKeysVisible` default. After mount, the user owns the
-    // toggle; we don't auto-flip on connect/disconnect to avoid
-    // pulling the bar out from under them mid-session.
-
     /// Color for the 1pt strip between adjacent panes. Contrasts
     /// with the *terminal* color scheme (not iOS light/dark): a
     /// dark scheme gets a near-white separator, a light scheme gets
@@ -165,15 +153,6 @@ struct DemoSessionView: View {
                     Divider()
                 }
                 paneArea
-                if specialKeysVisible {
-                    SoftKeyboard(onKey: { data in
-                        if let pid = backend.state.activePaneID,
-                           let pane = backend.pane(pid)
-                        {
-                            Task { await pane.send(data) }
-                        }
-                    })
-                }
             }
             // Bare exit-fullscreen affordance per UI vision §3.1.
             // No background circle — the icon alone, grey at rest,
@@ -334,15 +313,6 @@ struct DemoSessionView: View {
                     .font(.title3)
             }
 
-            Button {
-                specialKeysVisible.toggle()
-                FileLogger.shared.log("Demo: special keys → \(specialKeysVisible)")
-            } label: {
-                Image(systemName: specialKeysVisible
-                    ? "keyboard"
-                    : "keyboard.chevron.compact.down")
-                    .font(.title3)
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

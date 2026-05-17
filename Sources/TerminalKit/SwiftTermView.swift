@@ -20,9 +20,6 @@ import ColorSchemes
 /// callback that SwiftTerm used to fire is now driven by us
 /// directly.
 ///
-/// Software keys are NOT solved here — see Phase 2 (`SoftKeyboard`),
-/// which renders our own keyboard as a SwiftUI sibling and feeds
-/// bytes through the same `onInput` path.
 /// Thin `SwiftTerm.TerminalView` subclass that refuses to become
 /// first responder. Critical: the stock class *does* become FR on
 /// touch (via its UIKeyInput chain), and when it does iPadOS sees
@@ -233,8 +230,8 @@ final class TerminalHost: UIView {
     ///
     /// Coverage today is "the basics" — enough to type ASCII, run
     /// vim, navigate a shell. Composed input (IME), dead keys, and
-    /// most function-key behaviors land in Phase 2 alongside the
-    /// custom soft keyboard.
+    /// most function-key behaviors are TBD; the planned soft
+    /// keyboard will route through the same `onInput` path.
     private func encodeKey(_ key: UIKey) -> [UInt8]? {
         let mods = key.modifierFlags
         // Cmd-modified keys belong to menus / `.keyboardShortcut`.
@@ -289,9 +286,8 @@ final class TerminalHost: UIView {
 ///     driver eventually binds to the inner SwiftTerm view once it
 ///     has a real size.
 ///   - **Out (HW)**: `TerminalHost.pressesBegan` → `encodeKey` →
-///     `onInput`.
-///   - **Out (SW)**: solved separately by Phase 2's custom
-///     keyboard, which calls `onInput` directly.
+///     `onInput`. A software keyboard is not currently wired; when
+///     it returns it will call `onInput` along the same path.
 ///   - **Resize**: SwiftTerm reports `(cols, rows)` via
 ///     `onSizeChange`; the caller forwards to whatever PTY backs
 ///     the session.

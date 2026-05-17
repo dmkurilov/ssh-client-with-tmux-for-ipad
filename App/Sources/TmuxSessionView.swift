@@ -51,10 +51,6 @@ struct TmuxSessionView: View {
     @State private var capturedPaneIDs: Set<Int> = []
     @State private var tabsVisible: Bool = true
     @State private var fullScreen: Bool = false
-    /// Whether the slim accessory bar (Esc/Tab/arrows/`|`/prefix)
-    /// is shown above the keyboard. Independent of soft-keyboard
-    /// visibility — iPadOS owns that based on FR + HW state.
-    @State private var specialKeys: Bool = true
     /// `@State` on a class-type session persists across `NavigationStack`
     /// pop+push, so on a fresh appear the session may still hold the
     /// previous attach's `sessionID`. Without this flag, the next
@@ -83,11 +79,6 @@ struct TmuxSessionView: View {
                 Divider()
             }
             content
-            if specialKeys, let pid = currentPaneID {
-                SoftKeyboard(onKey: { data in
-                    sendInput(data, toPaneID: pid)
-                })
-            }
             if showingDebug {
                 Divider()
                 debugOverlay
@@ -120,16 +111,6 @@ struct TmuxSessionView: View {
                     Image(systemName: tabsVisible
                         ? "rectangle.split.3x1.fill"
                         : "rectangle.split.3x1")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    specialKeys.toggle()
-                    session.logDebug("toolbar.specialKeys → \(specialKeys)")
-                } label: {
-                    Image(systemName: specialKeys
-                        ? "keyboard"
-                        : "keyboard.chevron.compact.down")
                 }
             }
             ToolbarItem(placement: .primaryAction) {
