@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-11b — PaneLayoutEngine: chrome-aware recursive apportionment + per-pane resize"
+    static let signature = "2026-05-14b — 1pt visual borders; tmux gets logical +N-1 cells per split (free column)"
 }

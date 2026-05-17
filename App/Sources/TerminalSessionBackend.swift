@@ -98,6 +98,19 @@ protocol SessionBackend: AnyObject {
     /// the recapture sequence. Default no-op for backends without
     /// a notion of pane sizing.
     func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async
+
+    /// Apply a full window layout: resize the *window* to the
+    /// target cell dimensions first (so tmux's container is the
+    /// size our pane area can host), then resize each child pane
+    /// inside, then recapture. The window resize is what stops the
+    /// per-pane clamping loop seen when a tmux window's saved size
+    /// is smaller than what our pane area can hold. Default no-op.
+    func applyWindowLayout(
+        windowID: Int,
+        cellCols: Int,
+        cellRows: Int,
+        panes: [(paneID: Int, cols: Int, rows: Int)]
+    ) async
 }
 
 /// No-op default implementations so backends only override what
@@ -122,4 +135,10 @@ extension SessionBackend {
     func paneTitle(_ paneID: Int) -> String? { state.paneTitles[paneID] }
     func applyGrid(cols: Int, rows: Int) async {}
     func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async {}
+    func applyWindowLayout(
+        windowID: Int,
+        cellCols: Int,
+        cellRows: Int,
+        panes: [(paneID: Int, cols: Int, rows: Int)]
+    ) async {}
 }

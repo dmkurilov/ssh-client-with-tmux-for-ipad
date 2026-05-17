@@ -12,12 +12,13 @@ struct LayoutChrome: Equatable {
     /// Height of the per-pane "× title …" control panel at the top
     /// of every leaf pane.
     let controlPanelPt: CGFloat
-    /// Width of a visible border between adjacent siblings. tmux's
-    /// own 1-cell separator is *not* this — that's recovered by
-    /// leaving a gap in cell coordinates; this `border` is the
-    /// SwiftUI 1pt stroke (or whatever) we paint between panes.
-    /// Currently we paint via background-show-through, which is
-    /// 1pt, so `borderPt` default is 1.
+    /// Visible thickness of a divider between adjacent siblings.
+    /// **This is purely visual**: tmux's logical model always
+    /// reserves a full 1-cell border between panes, but we don't
+    /// need 9pt of empty space to show "these are two panes". 1pt
+    /// is enough to read, and gives each pane (cellWidth − 1)pt of
+    /// extra usable space per border — almost exactly one extra
+    /// cell of content per split.
     let borderPt: CGFloat
     /// Inner margin on each side of every pane. Used by the engine
     /// to subtract padding around the cell grid. 0 by default
@@ -25,6 +26,15 @@ struct LayoutChrome: Equatable {
     let marginPt: CGFloat
 
     static let `default` = LayoutChrome(controlPanelPt: 28, borderPt: 1, marginPt: 0)
+}
+
+/// What the engine returns: per-leaf decisions plus the window-wide
+/// cell dimensions (which include tmux's logical 1-cell borders, so
+/// they're suitable to pass straight to `resize-window`).
+struct EngineOutput: Equatable {
+    let layouts: [PaneFinalLayout]
+    let windowCellCols: Int
+    let windowCellRows: Int
 }
 
 /// One pane's final layout decision: how many cells it gets, where
@@ -77,31 +87,42 @@ enum PaneLayoutEngine {
         area: CGSize,
         cellMetrics: CellMetrics,
         chrome: LayoutChrome = .default
-    ) -> [PaneFinalLayout] {
+    ) -> EngineOutput {
         let rootRect = CGRect(origin: .zero, size: area)
         var out: [PaneFinalLayout] = []
-        recurse(tree, in: rootRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
-        return enforceMinimums(out)
+        let dims = recurse(tree, in: rootRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+        return EngineOutput(
+            layouts: enforceMinimums(out),
+            windowCellCols: dims.cols,
+            windowCellRows: dims.rows
+        )
     }
 
     // MARK: - Recursion
 
+    /// Returns the *tmux-cell* dimensions occupied by this subtree:
+    /// for a leaf, the leaf's (cellCols, cellRows); for a split,
+    /// the sum across the split's axis (including tmux's logical
+    /// 1-cell border between siblings) and the max across the
+    /// orthogonal axis. The window-wide tmux dimensions are the
+    /// root's return value — what we pass to `resize-window`.
+    @discardableResult
     private static func recurse(
         _ node: LayoutCellNode,
         in rect: CGRect,
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
         into out: inout [PaneFinalLayout]
-    ) {
+    ) -> (cols: Int, rows: Int) {
         switch node.kind {
         case .leaf(let paneID):
-            layoutLeaf(paneID: paneID, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutLeaf(paneID: paneID, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
 
         case .horizontal(let kids):
-            layoutHorizontal(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutHorizontal(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
 
         case .vertical(let kids):
-            layoutVertical(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutVertical(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
         }
     }
 
@@ -111,7 +132,7 @@ enum PaneLayoutEngine {
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
         into out: inout [PaneFinalLayout]
-    ) {
+    ) -> (cols: Int, rows: Int) {
         // Cells area is the leaf's rect minus its own chrome:
         // top: control panel + margin; sides + bottom: margin each.
         let innerW = max(0, rect.width  - 2 * chrome.marginPt)
@@ -135,6 +156,7 @@ enum PaneLayoutEngine {
             innerRect: innerRect, outerRect: rect,
             hidden: false
         ))
+        return (cols, rows)
     }
 
     private static func layoutHorizontal(
@@ -143,12 +165,15 @@ enum PaneLayoutEngine {
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
         into out: inout [PaneFinalLayout]
-    ) {
+    ) -> (cols: Int, rows: Int) {
         let n = kids.count
-        guard n > 0 else { return }
-        // Chrome between children: (N-1) borders + 2N margins.
-        // Margins are per-child L+R; included in each child's
-        // sub-rect width when we hand it down.
+        guard n > 0 else { return (0, 0) }
+        // Chrome between children: (N-1) *visual* borders (chrome.borderPt,
+        // typically 1pt) + 2N margins. Tmux's *logical* border is still
+        // 1 cell — we account for that in the return value below, not
+        // here. The mismatch on purpose: tmux's window cell count includes
+        // its border cells, but our visible pixels only consume `borderPt`
+        // per border, so the engine apportions more pane content cells.
         let chromeW = CGFloat(n - 1) * chrome.borderPt + CGFloat(2 * n) * chrome.marginPt
         let availableW = max(0, rect.width - chromeW)
         let totalCols = kids.reduce(0) { $0 + $1.cols }
@@ -175,13 +200,21 @@ enum PaneLayoutEngine {
 
         // Recurse into children at their computed x positions.
         var x = rect.minX
+        var totalCols = 0
+        var maxRows = 0
         for (i, kid) in kids.enumerated() {
             let cells = assignedCells[i]
             let kidOuterW = CGFloat(cells) * cellMetrics.cellWidth + 2 * chrome.marginPt
             let kidRect = CGRect(x: x, y: rect.minY, width: kidOuterW, height: rect.height)
-            recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            totalCols += kidDims.cols
+            maxRows = max(maxRows, kidDims.rows)
             x += kidOuterW + (i < n - 1 ? chrome.borderPt : 0)
         }
+        // tmux's logical border between siblings is 1 cell (always),
+        // even though we render it as `borderPt`. So the window-cell
+        // count for this subtree is (sum of pane cells) + (N-1).
+        return (totalCols + (n - 1), maxRows)
     }
 
     private static func layoutVertical(
@@ -190,12 +223,12 @@ enum PaneLayoutEngine {
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
         into out: inout [PaneFinalLayout]
-    ) {
+    ) -> (cols: Int, rows: Int) {
         let n = kids.count
-        guard n > 0 else { return }
-        // (N-1) borders + 2N margins + N control panels (each
-        // child's top has a control panel at the top of its
-        // sub-tree — the leaf or the topmost leaf of the sub-split).
+        guard n > 0 else { return (0, 0) }
+        // (N-1) visual borders + 2N margins + N control panels.
+        // tmux's *logical* row-border is 1 cell — see the return
+        // value below.
         let chromeH = CGFloat(n - 1) * chrome.borderPt
                     + CGFloat(2 * n) * chrome.marginPt
                     + CGFloat(n) * chrome.controlPanelPt
@@ -221,15 +254,21 @@ enum PaneLayoutEngine {
         }
 
         var y = rect.minY
+        var maxCols = 0
+        var totalRows = 0
         for (i, kid) in kids.enumerated() {
             let cells = assignedCells[i]
             let kidOuterH = CGFloat(cells) * cellMetrics.cellHeight
                           + chrome.controlPanelPt
                           + 2 * chrome.marginPt
             let kidRect = CGRect(x: rect.minX, y: y, width: rect.width, height: kidOuterH)
-            recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            maxCols = max(maxCols, kidDims.cols)
+            totalRows += kidDims.rows
             y += kidOuterH + (i < n - 1 ? chrome.borderPt : 0)
         }
+        // tmux's logical between-rows border is 1 cell each.
+        return (maxCols, totalRows + (n - 1))
     }
 
     // MARK: - Minimum-cell enforcement (no redistribution yet)

@@ -51,6 +51,15 @@ struct TmuxBackendSessionView: View {
                     showFakeBadge: false,
                     onClose: { Task { await close() } }
                 )
+                // Tie the view's SwiftUI identity to the backend
+                // *instance*. A reconnect creates a fresh
+                // `TmuxSessionBackend`, which forces SwiftUI to
+                // tear down and re-mount the inner view — so
+                // `@State` (including `layoutCache`) starts clean
+                // for every (re)attach. Without this, SwiftUI may
+                // reuse the previous view's identity and carry
+                // stale per-window caches into the new session.
+                .id(ObjectIdentifier(backend))
             } else {
                 connectingView
             }

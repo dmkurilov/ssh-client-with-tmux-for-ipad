@@ -103,21 +103,34 @@ struct DemoSessionView: View {
         }
     }
 
-    /// Last engine output we sent to the backend. Tracked so we
-    /// don't churn applyPaneLayout when nothing changed — keys are
-    /// `(paneID, cellCols, cellRows)`, equality means "no resize
-    /// needed."
-    @State private var lastLayoutEntries: [PaneFinalLayout] = []
     /// `true` once we've confirmed tmux's layout reflects a request
     /// we made. Until then the pane area shows a small spinner so
     /// we don't paint stale-grid content from before the handshake.
     @State private var gridReady: Bool = false
     /// Most recent computed engine layout (per-pane pixel rects +
-    /// hidden flag). Recomputed on pane-area-size or `cellTree`
-    /// change. Empty if the backend hasn't sent a tree yet.
+    /// hidden flag) for the *active* window. Mirror of
+    /// `layoutCache[activeWindowID].layouts`.
     @State private var paneFinalLayouts: [PaneFinalLayout] = []
     /// Measured pane-area pixel size from the inner GeometryReader.
     @State private var paneAreaSize: CGSize = .zero
+    /// Per-window cache of engine output. Avoids re-running the
+    /// engine — and re-issuing per-pane `resize-pane` to tmux —
+    /// every time the user taps a tab. Without this, tmux's
+    /// sequential resize-pane drift would shift `%1` / `%2` by one
+    /// row on every tab switch (see `debug.log.55`). Invalidated
+    /// per-window when its topology changes, globally when the
+    /// pane area changes (rotation / chrome toggle / etc.).
+    @State private var layoutCache: [Int: CachedWindowLayout] = [:]
+
+
+    /// Captures everything we need to decide "still valid": the
+    /// topology shape the engine apportioned against, the pane area
+    /// that was available, and the resulting per-pane layout.
+    private struct CachedWindowLayout {
+        let topology: LayoutCellNode
+        let paneArea: CGSize
+        let layouts: [PaneFinalLayout]
+    }
 
     // `HardwareKeyboardObserver.shared` informs the initial
     // `specialKeysVisible` default. After mount, the user owns the
@@ -449,15 +462,44 @@ struct DemoSessionView: View {
                 paneAreaContent(window: win, area: geo.size)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                     .onAppear {
+                        // Each fresh appearance gets a clean cache.
+                        // Defensive: SwiftUI sometimes keeps the
+                        // same DemoSessionView identity across a
+                        // disconnect/reconnect, which would leave
+                        // stale per-window cached layouts from the
+                        // previous tmux session. Clearing on appear
+                        // forces the first engine pass on (re)attach.
+                        layoutCache.removeAll()
                         paneAreaSize = geo.size
-                        syncLayoutFromEngine(window: win)
+                        syncAllWindowLayouts()
                     }
                     .onChange(of: geo.size) { _, new in
+                        // Pane area moved — every window's cached
+                        // layout was sized to the old area and is
+                        // now stale. Drop the whole cache so
+                        // every tab recomputes.
                         paneAreaSize = new
-                        syncLayoutFromEngine(window: win)
+                        layoutCache.removeAll()
+                        syncAllWindowLayouts()
                     }
-                    .onChange(of: win.cellTree) { _, _ in
-                        syncLayoutFromEngine(window: win)
+                    // Tab tap: `activeWindowID` changes but the
+                    // window trees don't, so the `cellTree`
+                    // .onChange below wouldn't fire. We still need
+                    // to update `paneFinalLayouts` to the new
+                    // active window's cached layout (or compute
+                    // it if first visit). syncAllWindowLayouts is
+                    // cheap when caches are warm.
+                    .onChange(of: backend.state.activeWindowID) { _, _ in
+                        syncAllWindowLayouts()
+                    }
+                    // Watch *every* window's cellTree, not just the
+                    // active one. tmux pushes `%layout-change`
+                    // events for any window — including external
+                    // resizes from a second client connected to the
+                    // same session — and we want those reflected
+                    // for every tab, not just the visible one.
+                    .onChange(of: backend.state.windows.map { $0.cellTree }) { _, _ in
+                        syncAllWindowLayouts()
                     }
             }
         } else {
@@ -473,54 +515,112 @@ struct DemoSessionView: View {
         }
     }
 
+    /// Tree-structural equality: same split tree shape and same
+    /// pane ids at the leaves, ignoring cell counts. Used as the
+    /// first half of the cache-hit check.
+    private static func sameTopology(_ a: LayoutCellNode, _ b: LayoutCellNode) -> Bool {
+        switch (a.kind, b.kind) {
+        case (.leaf(let pa), .leaf(let pb)):
+            return pa == pb
+        case (.horizontal(let ka), .horizontal(let kb)),
+             (.vertical(let ka), .vertical(let kb)):
+            return ka.count == kb.count
+                && zip(ka, kb).allSatisfy { sameTopology($0, $1) }
+        default:
+            return false
+        }
+    }
+
+
     /// Re-run `PaneLayoutEngine` against the current pane area + the
     /// active window's tmux-authored cell tree. If the engine's
     /// per-pane decisions differ from what we last sent, ship the
     /// new sizes to the backend (which will issue per-pane
     /// `resize-pane` and recapture). Idempotent — repeated calls
     /// with no state change are silent.
+    /// Run the engine for `win`. The function is window-agnostic:
+    /// it caches per `win.id` and only touches the *active*-window
+    /// rendering state (`paneFinalLayouts`, `gridReady`). Used both
+    /// directly for the active window and indirectly from
+    /// `syncAllWindowLayouts` for background-warming non-active tabs.
     private func syncLayoutFromEngine(window win: WindowInfo) {
         guard paneAreaSize.width > 0, paneAreaSize.height > 0 else { return }
+        let isActive = (win.id == backend.state.activeWindowID)
         guard let tree = win.cellTree else {
-            // No tree yet (mid-attach, or fake backend). Mark
-            // gridReady so the spinner clears for the fallback
-            // proportional renderer; nothing else to do.
-            if !gridReady { gridReady = true }
+            // No tmux layout yet for this window (just created and
+            // we haven't pulled its layout back, fake backend, etc.).
+            // If this is the active window, *clear* paneFinalLayouts
+            // so the renderer falls through to the proportional
+            // fallback using the new window's topology — otherwise
+            // we'd keep painting the previously-active window's
+            // pane rectangles + pane ids, which is exactly the
+            // "new tab shows the old tab's content" bug.
+            if isActive {
+                if !paneFinalLayouts.isEmpty { paneFinalLayouts = [] }
+                if !gridReady { gridReady = true }
+            }
             return
         }
-        let layouts = PaneLayoutEngine.layout(
+        // Cache hit: same window, same topology, same pane area.
+        // Drift in cell counts is *expected* (tmux's resize-pane is
+        // sequential and our chrome math eats a few cells per
+        // split), so we ignore it. External resize handling — when
+        // another client moves a divider — is *not* covered here;
+        // that's a future addition. For now, persistence wins.
+        if let cached = layoutCache[win.id],
+           cached.paneArea == paneAreaSize,
+           Self.sameTopology(cached.topology, tree)
+        {
+            if isActive {
+                paneFinalLayouts = cached.layouts
+                if !gridReady { gridReady = true }
+            }
+            return
+        }
+        // Cache miss: compute fresh and send to tmux.
+        let output = PaneLayoutEngine.layout(
             tree: tree,
             area: paneAreaSize,
             cellMetrics: cellMetrics
         )
-        paneFinalLayouts = layouts
-        // Only send to tmux if the per-pane (cols, rows) decision
-        // changed since last send. Compare on the cell-grid keys
-        // the backend cares about, ignoring pixel rects.
-        struct LayoutKey: Equatable {
-            let paneID: Int
-            let cols: Int
-            let rows: Int
-            let hidden: Bool
+        layoutCache[win.id] = CachedWindowLayout(
+            topology: tree,
+            paneArea: paneAreaSize,
+            layouts: output.layouts
+        )
+        if isActive {
+            paneFinalLayouts = output.layouts
         }
-        let nowKeys = layouts.map {
-            LayoutKey(paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows, hidden: $0.hidden)
-        }
-        let prevKeys = lastLayoutEntries.map {
-            LayoutKey(paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows, hidden: $0.hidden)
-        }
-        if nowKeys != prevKeys {
-            lastLayoutEntries = layouts
-            let entries = layouts.map { (paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows) }
-            FileLogger.shared.log("Demo: engine produced \(entries.count) panes — \(entries.map { "%\($0.paneID)=\($0.cols)x\($0.rows)" }.joined(separator: " "))")
-            gridReady = false
-            Task {
-                await backend.applyPaneLayout(entries)
-                await MainActor.run { self.gridReady = true }
+        let entries = output.layouts.map { (paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows) }
+        FileLogger.shared.log("Demo: engine for @\(win.id) → window=\(output.windowCellCols)x\(output.windowCellRows) panes: \(entries.map { "%\($0.paneID)=\($0.cols)x\($0.rows)" }.joined(separator: " "))")
+        if isActive { gridReady = false }
+        Task {
+            await backend.applyWindowLayout(
+                windowID: win.id,
+                cellCols: output.windowCellCols,
+                cellRows: output.windowCellRows,
+                panes: entries
+            )
+            await MainActor.run {
+                if isActive { self.gridReady = true }
             }
-        } else if !gridReady {
-            // Engine confirms tmux state matches last send.
-            gridReady = true
+        }
+    }
+
+    /// Run the engine for every window in the session — active
+    /// first (so its spinner clears as fast as possible), then the
+    /// rest in background. Cache hits early-return; misses
+    /// trigger compute + `resize-pane`. Triggered on attach, on
+    /// pane-area change (rotation / chrome toggle), and on any
+    /// window's `cellTree` change.
+    private func syncAllWindowLayouts() {
+        let windows = backend.state.windows
+        let activeID = backend.state.activeWindowID
+        if let activeID, let active = windows.first(where: { $0.id == activeID }) {
+            syncLayoutFromEngine(window: active)
+        }
+        for window in windows where window.id != activeID {
+            syncLayoutFromEngine(window: window)
         }
     }
 

@@ -134,6 +134,20 @@ final class TmuxSessionBackend: SessionBackend {
     /// `SessionState` and reconciles per-pane backends.
     func didHandle(_ event: TmuxEvent) {
         syncState()
+        // Tmux in -CC mode emits `%window-add` for a freshly created
+        // window without an accompanying `%layout-change`. That
+        // leaves us with the window known by id but `cellTree == nil`
+        // — the layout engine has nothing to apportion against, the
+        // SwiftUI render keeps painting the previous active tab's
+        // panes, and "new tab shows the old tab's content." Pull
+        // layouts ourselves whenever a window appears so the
+        // missing-event case is patched at the source.
+        if case .windowAdd = event {
+            Task { [weak self] in
+                guard let self, let shell = self.shell else { return }
+                await self.refreshActiveWindowLayout(shell: shell)
+            }
+        }
     }
 
     func syncState() {
@@ -301,18 +315,58 @@ final class TmuxSessionBackend: SessionBackend {
     /// `applyGrid`, but driven by what the chrome can actually
     /// fit — chrome-subtracted apportionment up front, exact
     /// targets to tmux at the end.
+    func applyWindowLayout(
+        windowID: Int,
+        cellCols: Int,
+        cellRows: Int,
+        panes: [(paneID: Int, cols: Int, rows: Int)]
+    ) async {
+        guard let shell, cellCols > 0, cellRows > 0 else { return }
+        FileLogger.shared.log("TmuxBackend.applyWindowLayout @\(windowID) → window=\(cellCols)x\(cellRows) panes=\(panes.count)")
+        // 1. Resize the window itself first. Without this, tmux
+        // would clamp our per-pane resize requests against the
+        // window's saved size — which for non-active windows on
+        // attach is whatever the previous client left it at.
+        await write("resize-window -t @\(windowID) -x \(cellCols) -y \(cellRows)\n")
+        // 2. Per-pane resize, deduping against tmux's *current*
+        // sizes (now that the window's been resized, list-windows
+        // would still report the pre-resize per-pane sizes until
+        // tmux re-flows — but the dedupe still helps for repeated
+        // calls with stable inputs).
+        var currentSize: [Int: (cols: Int, rows: Int)] = [:]
+        for win in tmux.windows {
+            if let layout = win.layout {
+                collectCurrentSizes(layout, into: &currentSize)
+            }
+        }
+        for entry in panes {
+            let current = currentSize[entry.paneID]
+            guard current?.cols != entry.cols || current?.rows != entry.rows else {
+                continue
+            }
+            await write("resize-pane -t %\(entry.paneID) -x \(entry.cols) -y \(entry.rows)\n")
+        }
+        // 3. Read back the new layout so state.windows reflects
+        // tmux's actual response.
+        await refreshActiveWindowLayout(shell: shell)
+        // 4. Recapture each pane so SwiftTerm's grid content lines
+        // up with tmux's post-resize grid content.
+        for entry in panes {
+            await recapturePane(paneID: entry.paneID)
+        }
+    }
+
     func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async {
         guard let shell, !entries.isEmpty else { return }
         FileLogger.shared.log("TmuxBackend.applyPaneLayout entries=\(entries.count)")
-        // Build a lookup of tmux's current per-pane sizes so we
-        // only resize panes that disagree. Saves bandwidth and
-        // avoids tmux re-flowing on no-ops.
+        // Collect current per-pane sizes across *all* windows so
+        // entries belonging to a non-active tab can also dedup the
+        // "size already matches" case.
         var currentSize: [Int: (cols: Int, rows: Int)] = [:]
-        if let activeWid = state.activeWindowID,
-           let win = tmux.windows.first(where: { $0.id == activeWid }),
-           let layout = win.layout
-        {
-            collectCurrentSizes(layout, into: &currentSize)
+        for win in tmux.windows {
+            if let layout = win.layout {
+                collectCurrentSizes(layout, into: &currentSize)
+            }
         }
         var changed = false
         for entry in entries {
@@ -324,17 +378,17 @@ final class TmuxSessionBackend: SessionBackend {
             changed = true
         }
         if changed {
+            // list-windows refreshes every window's layout, not
+            // just the active one — the name is misleading but the
+            // body iterates all snapshots. So one call is enough
+            // regardless of which window's panes we resized.
             await refreshActiveWindowLayout(shell: shell)
         }
-        // Recapture every pane in the active window so SwiftTerm's
-        // grid content matches tmux's post-resize grid content.
-        if let activeWid = state.activeWindowID,
-           let win = tmux.windows.first(where: { $0.id == activeWid }),
-           let layout = win.layout
-        {
-            for paneID in layout.paneIDs {
-                await recapturePane(paneID: paneID)
-            }
+        // Recapture exactly the panes whose sizes we touched. Earlier
+        // versions recaptured "every pane in the active window";
+        // wrong for entries belonging to a non-active tab.
+        for entry in entries {
+            await recapturePane(paneID: entry.paneID)
         }
     }
 
@@ -424,8 +478,18 @@ final class TmuxSessionBackend: SessionBackend {
         FileLogger.shared.log("[%\(paneID)] recapturePane begin")
         driver.suspend()
         do {
+            // `capture-pane -p -e` (no `-S`) captures *only* the
+            // current visible area, not the scrollback. tmux preserves
+            // scrollback at the cell width each line was written at —
+            // mixing widths within one session (rotations, splits,
+            // earlier geometry bugs) leaves stale lines whose hard
+            // wraps disagree with the current grid. Feeding them to
+            // SwiftTerm at the current width produced the screen-101
+            // visual mess. The user can still browse scrollback via
+            // tmux's `copy-mode` (Ctrl-b [) — we just don't replay
+            // it client-side.
             let captureLines = try await tmux.runCommand(
-                "capture-pane -p -e -S - -t %\(paneID)\n",
+                "capture-pane -p -e -t %\(paneID)\n",
                 write: { try await shell.write($0) }
             )
             // Cursor position lives on a separate query because
