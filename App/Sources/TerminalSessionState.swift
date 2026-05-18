@@ -307,6 +307,36 @@ struct LayoutCellNode: Equatable {
         }
     }
 
+    /// Write engine-apportioned cell counts back into the tree as
+    /// the new weights. After this, `leaf.cols == engine.cellCols`
+    /// and `leaf.rows == engine.cellRows`, which means a subsequent
+    /// `resizingPane(±N)` translates into exactly ±N cells of
+    /// engine output (modulo sibling-floor clamping). Without this
+    /// normalization the tree's cols/rows fields are *weights* that
+    /// the engine then re-apportions into cells — a +85-weight bump
+    /// against a [1, 480] tree produces +23 cells, not +85. Internal
+    /// split nodes get their cols/rows recomputed from the new
+    /// children to keep "subtree cells == sum of children + tmux's
+    /// 1-cell logical borders" along the split axis, max along the
+    /// orthogonal axis.
+    func normalizingWeights(leafSizes: [Int: (cols: Int, rows: Int)]) -> LayoutCellNode {
+        switch kind {
+        case .leaf(let pid):
+            guard let size = leafSizes[pid] else { return self }
+            return LayoutCellNode(cols: size.cols, rows: size.rows, kind: kind)
+        case .horizontal(let kids):
+            let newKids = kids.map { $0.normalizingWeights(leafSizes: leafSizes) }
+            let newCols = newKids.reduce(0) { $0 + $1.cols } + max(0, newKids.count - 1)
+            let newRows = newKids.map(\.rows).max() ?? 0
+            return LayoutCellNode(cols: newCols, rows: newRows, kind: .horizontal(children: newKids))
+        case .vertical(let kids):
+            let newKids = kids.map { $0.normalizingWeights(leafSizes: leafSizes) }
+            let newCols = newKids.map(\.cols).max() ?? 0
+            let newRows = newKids.reduce(0) { $0 + $1.rows } + max(0, newKids.count - 1)
+            return LayoutCellNode(cols: newCols, rows: newRows, kind: .vertical(children: newKids))
+        }
+    }
+
     /// Build a default cell tree mirroring a topology-only `PaneNode`.
     /// Each leaf gets a small cell budget; splits sum across their
     /// axis (including tmux's logical 1-cell border between siblings)

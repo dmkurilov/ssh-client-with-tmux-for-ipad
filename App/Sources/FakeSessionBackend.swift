@@ -213,6 +213,34 @@ final class FakeSessionBackend: SessionBackend {
         FileLogger.shared.log("FakeSession.applyPaneLayout entries=\(entries.count)")
     }
 
+    /// Engine has just apportioned cell counts for every leaf in
+    /// this window. Write those back into the cellTree as the
+    /// leaves' new weights. Without this, the tree's cols/rows
+    /// stay at whatever `defaultTree` / `splittingPane` /
+    /// `resizingPane` last set them to — abstract weights that the
+    /// engine then re-apportions by ratio. With it, weights = cells,
+    /// so a drag of +N cells produces +N cells of engine output
+    /// (modulo sibling-floor clamp). Idempotent: a no-op when the
+    /// tree is already normalized, which avoids ping-ponging the
+    /// `.onChange(cellTree)` observer.
+    func applyWindowLayout(
+        windowID: Int,
+        cellCols: Int,
+        cellRows: Int,
+        panes: [(paneID: Int, cols: Int, rows: Int)]
+    ) async {
+        guard let widx = state.windows.firstIndex(where: { $0.id == windowID }) else { return }
+        var win = state.windows[widx]
+        guard let tree = win.cellTree else { return }
+        var sizes: [Int: (cols: Int, rows: Int)] = [:]
+        sizes.reserveCapacity(panes.count)
+        for p in panes { sizes[p.paneID] = (p.cols, p.rows) }
+        let normalized = tree.normalizingWeights(leafSizes: sizes)
+        guard normalized != tree else { return }
+        win.cellTree = normalized
+        state.windows[widx] = win
+    }
+
     /// Walk the cell tree to find a leaf's current cell size. Used by
     /// `applyPaneLayout` to compute the signed delta for an absolute
     /// resize target.

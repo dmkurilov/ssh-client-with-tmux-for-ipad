@@ -487,6 +487,7 @@ struct DemoSessionView: View {
             Text(label)
                 .font(.caption.monospaced())
                 .fontWeight(isActive ? .bold : .regular)
+                .foregroundStyle(isActive ? Color.primary : Color.primary.opacity(0.35))
                 .contentShape(Rectangle())
                 .onTapGesture {
                     Task { await backend.selectWindow(window.id) }
@@ -513,7 +514,7 @@ struct DemoSessionView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
+        .background(isActive ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         // Accept dropped panes from another tab. We encode the
         // dragged pane id as `pane:%<id>` (see paneControlOverlay)
@@ -1111,15 +1112,27 @@ struct DemoSessionView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Active/inactive shown via stroke colour and width
-            // (matches the look in `TmuxSessionView`). Previously we
-            // dimmed the inactive pane with `.opacity(0.8)`, but the
-            // 20% transparency let the `paneSeparator` colour bleed
-            // through and the result looked progressively darker
-            // when nested inside multiple splits — the user's "more
-            // splits, more darker" complaint. A border keeps each
-            // pane's terminal colours pixel-identical regardless of
-            // active state or split nesting.
+            // Two layered overlays for active/inactive feedback:
+            // 1. A solid black wash at low opacity *on top of* the
+            //    inactive pane. We paint over the pane, not modify
+            //    its alpha — so the underlying terminal colors stay
+            //    fully opaque and the separator never bleeds through
+            //    (which is what the previous `.opacity(0.8)` did,
+            //    and is why earlier nested splits looked
+            //    progressively darker). `allowsHitTesting(false)`
+            //    so the wash doesn't swallow taps meant for the pane
+            //    underneath.
+            // 2. A rounded stroke that's thicker + accent-tinted on
+            //    the active pane, thin + gray on inactives. The
+            //    border sits on top of the dim wash so it remains
+            //    crisp.
+            .overlay {
+                if !isActive {
+                    Color.black.opacity(0.18)
+                        .allowsHitTesting(false)
+                        .clipShape(RoundedRectangle(cornerRadius: 2))
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(
