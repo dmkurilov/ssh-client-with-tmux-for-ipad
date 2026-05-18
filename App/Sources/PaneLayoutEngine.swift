@@ -28,11 +28,45 @@ struct LayoutChrome: Equatable {
     static let `default` = LayoutChrome(controlPanelPt: 28, borderPt: 1, marginPt: 0)
 }
 
-/// What the engine returns: per-leaf decisions plus the window-wide
-/// cell dimensions (which include tmux's logical 1-cell borders, so
-/// they're suitable to pass straight to `resize-window`).
+/// One draggable boundary between two adjacent panes (or pane
+/// subtrees) in the engine output. Walks the cell tree to find
+/// these — at each split, one divider between each pair of
+/// consecutive children. The `referencePaneID` is *any* leaf in
+/// the subtree on the side that owns the edge, suitable for
+/// `resize-pane -t %X -L|R|U|D N` targeting.
+struct EngineDivider: Equatable {
+    enum Axis: Equatable {
+        /// Vertical line drawn between horizontally-stacked siblings;
+        /// drag left/right to move the boundary.
+        case vertical
+        /// Horizontal line drawn between vertically-stacked siblings;
+        /// drag up/down to move the boundary.
+        case horizontal
+    }
+
+    let axis: Axis
+    /// 8pt-thick hit-test rect centered on the visual divider line.
+    /// Wider than the 1pt visible separator to make the handle easy
+    /// to grab without precise touch placement.
+    let hitRect: CGRect
+    /// Any leaf pane id on the "before" side of the divider (left
+    /// for vertical, top for horizontal). Used as the
+    /// `resize-pane -t` target — pushing this pane's far edge in
+    /// the drag direction is exactly what the user is doing.
+    let beforePaneID: Int
+    /// Any leaf pane id on the "after" side — mirror of
+    /// `beforePaneID`. Carried so drag-toward-the-other-direction
+    /// can target either side.
+    let afterPaneID: Int
+}
+
+/// What the engine returns: per-leaf decisions, draggable dividers,
+/// and the window-wide cell dimensions (which include tmux's logical
+/// 1-cell borders, so they're suitable to pass straight to
+/// `resize-window`).
 struct EngineOutput: Equatable {
     let layouts: [PaneFinalLayout]
+    let dividers: [EngineDivider]
     let windowCellCols: Int
     let windowCellRows: Int
 }
@@ -89,10 +123,26 @@ enum PaneLayoutEngine {
         chrome: LayoutChrome = .default
     ) -> EngineOutput {
         let rootRect = CGRect(origin: .zero, size: area)
+        // Flatten same-axis nested splits before apportioning so
+        // each leaf's CP (control panel) is counted exactly once.
+        // Without this, `layoutVertical` subtracts N*CP at every
+        // split level, and 6 levels of binary nesting eats roughly
+        // 6 phantom CPs (~168pt) of "ghost chrome" that shows up
+        // as empty space at the bottom of the column.
+        let flatTree = tree.flattenedSameAxisSplits()
         var out: [PaneFinalLayout] = []
-        let dims = recurse(tree, in: rootRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+        var dividers: [EngineDivider] = []
+        let dims = recurse(
+            flatTree,
+            in: rootRect,
+            cellMetrics: cellMetrics,
+            chrome: chrome,
+            leaves: &out,
+            dividers: &dividers
+        )
         return EngineOutput(
             layouts: enforceMinimums(out),
+            dividers: dividers,
             windowCellCols: dims.cols,
             windowCellRows: dims.rows
         )
@@ -112,17 +162,18 @@ enum PaneLayoutEngine {
         in rect: CGRect,
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
-        into out: inout [PaneFinalLayout]
+        leaves: inout [PaneFinalLayout],
+        dividers: inout [EngineDivider]
     ) -> (cols: Int, rows: Int) {
         switch node.kind {
         case .leaf(let paneID):
-            return layoutLeaf(paneID: paneID, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutLeaf(paneID: paneID, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &leaves)
 
         case .horizontal(let kids):
-            return layoutHorizontal(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutHorizontal(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, leaves: &leaves, dividers: &dividers)
 
         case .vertical(let kids):
-            return layoutVertical(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            return layoutVertical(kids: kids, rect: rect, cellMetrics: cellMetrics, chrome: chrome, leaves: &leaves, dividers: &dividers)
         }
     }
 
@@ -164,7 +215,8 @@ enum PaneLayoutEngine {
         rect: CGRect,
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
-        into out: inout [PaneFinalLayout]
+        leaves: inout [PaneFinalLayout],
+        dividers: inout [EngineDivider]
     ) -> (cols: Int, rows: Int) {
         let n = kids.count
         guard n > 0 else { return (0, 0) }
@@ -176,8 +228,8 @@ enum PaneLayoutEngine {
         // per border, so the engine apportions more pane content cells.
         let chromeW = CGFloat(n - 1) * chrome.borderPt + CGFloat(2 * n) * chrome.marginPt
         let availableW = max(0, rect.width - chromeW)
-        let totalCols = kids.reduce(0) { $0 + $1.cols }
-        guard totalCols > 0 else { return }
+        let weightCols = kids.reduce(0) { $0 + $1.cols }
+        guard weightCols > 0 else { return (0, 0) }
 
         // Apportion cell counts per child.
         var assignedCells: [Int] = []
@@ -190,7 +242,7 @@ enum PaneLayoutEngine {
                 let remainingPt = availableW - CGFloat(cellsAssignedSoFar) * cellMetrics.cellWidth
                 cells = max(0, Int((remainingPt / cellMetrics.cellWidth).rounded(.down)))
             } else {
-                let rate = Double(kid.cols) / Double(totalCols)
+                let rate = Double(kid.cols) / Double(weightCols)
                 let pt = Double(availableW) * rate
                 cells = max(0, Int((pt / Double(cellMetrics.cellWidth)).rounded()))
                 cellsAssignedSoFar += cells
@@ -202,13 +254,31 @@ enum PaneLayoutEngine {
         var x = rect.minX
         var totalCols = 0
         var maxRows = 0
+        var prevKidLastLeaf: Int? = nil
         for (i, kid) in kids.enumerated() {
             let cells = assignedCells[i]
             let kidOuterW = CGFloat(cells) * cellMetrics.cellWidth + 2 * chrome.marginPt
             let kidRect = CGRect(x: x, y: rect.minY, width: kidOuterW, height: rect.height)
-            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, leaves: &leaves, dividers: &dividers)
             totalCols += kidDims.cols
             maxRows = max(maxRows, kidDims.rows)
+            // Divider between this kid and the previous one — using
+            // the leaves we just appended to pick reference pane ids.
+            if i > 0, let before = prevKidLastLeaf, let after = kid.paneIDs.first {
+                let borderCenterX = x - chrome.borderPt / 2
+                dividers.append(EngineDivider(
+                    axis: .vertical,
+                    hitRect: CGRect(
+                        x: borderCenterX - 4,
+                        y: rect.minY,
+                        width: 8 + chrome.borderPt,
+                        height: rect.height
+                    ),
+                    beforePaneID: before,
+                    afterPaneID: after
+                ))
+            }
+            prevKidLastLeaf = kid.paneIDs.last
             x += kidOuterW + (i < n - 1 ? chrome.borderPt : 0)
         }
         // tmux's logical border between siblings is 1 cell (always),
@@ -222,7 +292,8 @@ enum PaneLayoutEngine {
         rect: CGRect,
         cellMetrics: CellMetrics,
         chrome: LayoutChrome,
-        into out: inout [PaneFinalLayout]
+        leaves: inout [PaneFinalLayout],
+        dividers: inout [EngineDivider]
     ) -> (cols: Int, rows: Int) {
         let n = kids.count
         guard n > 0 else { return (0, 0) }
@@ -233,8 +304,8 @@ enum PaneLayoutEngine {
                     + CGFloat(2 * n) * chrome.marginPt
                     + CGFloat(n) * chrome.controlPanelPt
         let availableH = max(0, rect.height - chromeH)
-        let totalRows = kids.reduce(0) { $0 + $1.rows }
-        guard totalRows > 0 else { return }
+        let weightRows = kids.reduce(0) { $0 + $1.rows }
+        guard weightRows > 0 else { return (0, 0) }
 
         var assignedCells: [Int] = []
         assignedCells.reserveCapacity(n)
@@ -245,7 +316,7 @@ enum PaneLayoutEngine {
                 let remainingPt = availableH - CGFloat(cellsAssignedSoFar) * cellMetrics.cellHeight
                 cells = max(0, Int((remainingPt / cellMetrics.cellHeight).rounded(.down)))
             } else {
-                let rate = Double(kid.rows) / Double(totalRows)
+                let rate = Double(kid.rows) / Double(weightRows)
                 let pt = Double(availableH) * rate
                 cells = max(0, Int((pt / Double(cellMetrics.cellHeight)).rounded()))
                 cellsAssignedSoFar += cells
@@ -256,15 +327,31 @@ enum PaneLayoutEngine {
         var y = rect.minY
         var maxCols = 0
         var totalRows = 0
+        var prevKidLastLeaf: Int? = nil
         for (i, kid) in kids.enumerated() {
             let cells = assignedCells[i]
             let kidOuterH = CGFloat(cells) * cellMetrics.cellHeight
                           + chrome.controlPanelPt
                           + 2 * chrome.marginPt
             let kidRect = CGRect(x: rect.minX, y: y, width: rect.width, height: kidOuterH)
-            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, into: &out)
+            let kidDims = recurse(kid, in: kidRect, cellMetrics: cellMetrics, chrome: chrome, leaves: &leaves, dividers: &dividers)
             maxCols = max(maxCols, kidDims.cols)
             totalRows += kidDims.rows
+            if i > 0, let before = prevKidLastLeaf, let after = kid.paneIDs.first {
+                let borderCenterY = y - chrome.borderPt / 2
+                dividers.append(EngineDivider(
+                    axis: .horizontal,
+                    hitRect: CGRect(
+                        x: rect.minX,
+                        y: borderCenterY - 4,
+                        width: rect.width,
+                        height: 8 + chrome.borderPt
+                    ),
+                    beforePaneID: before,
+                    afterPaneID: after
+                ))
+            }
+            prevKidLastLeaf = kid.paneIDs.last
             y += kidOuterH + (i < n - 1 ? chrome.borderPt : 0)
         }
         // tmux's logical between-rows border is 1 cell each.
@@ -273,19 +360,21 @@ enum PaneLayoutEngine {
 
     // MARK: - Minimum-cell enforcement (no redistribution yet)
 
-    /// Mark any pane below the minimum cell counts as hidden. The
-    /// caller resizes hidden panes to (`minCols`, `minRows`) in
-    /// tmux so they keep state but don't visibly steal area. A
-    /// real redistribution pass (move cells from larger siblings)
-    /// is deferred — for now hidden panes show as empty in the
-    /// UI and reappear when room opens up.
+    /// Mark any pane whose apportioned cell count fell below the
+    /// minimum as hidden. The cell counts themselves are *not*
+    /// clamped — we send the engine's natural output to tmux and
+    /// let tmux's own minimums apply. The hidden flag is a
+    /// rendering-only decision: `DemoSessionView` skips mounting a
+    /// SwiftTermView for hidden panes, but the per-pane driver keeps
+    /// buffering bytes so the pane comes back instantly when room
+    /// opens up.
     private static func enforceMinimums(_ layouts: [PaneFinalLayout]) -> [PaneFinalLayout] {
         layouts.map { p in
             if p.cellCols < minCols || p.cellRows < minRows {
                 return PaneFinalLayout(
                     paneID: p.paneID,
-                    cellCols: max(p.cellCols, minCols),
-                    cellRows: max(p.cellRows, minRows),
+                    cellCols: p.cellCols,
+                    cellRows: p.cellRows,
                     innerRect: p.innerRect,
                     outerRect: p.outerRect,
                     hidden: true

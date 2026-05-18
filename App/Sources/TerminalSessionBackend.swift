@@ -111,6 +111,26 @@ protocol SessionBackend: AnyObject {
         cellRows: Int,
         panes: [(paneID: Int, cols: Int, rows: Int)]
     ) async
+
+    /// Push a pane's edge by `cells` cells in `direction`. The
+    /// pane's container split absorbs the change — sibling on the
+    /// pushed side grows/shrinks correspondingly. Used by the drag
+    /// handle UI in `DemoSessionView`. For tmux this maps to
+    /// `resize-pane -t %X -L|-R|-U|-D N`; for the demo's fake
+    /// backend it mutates the in-memory cell tree directly. Default
+    /// no-op for backends without resize.
+    func resizePane(
+        _ paneID: Int,
+        direction: ResizeDirection,
+        cells: Int
+    ) async
+}
+
+/// Which edge of a pane is being pushed when resizing. Maps to
+/// tmux's `resize-pane -L|R|U|D` flags, and to "drag the right
+/// edge of leaf X to the right by N cells" in user terms.
+enum ResizeDirection: Equatable {
+    case left, right, up, down
 }
 
 /// No-op default implementations so backends only override what
@@ -141,4 +161,5 @@ extension SessionBackend {
         cellRows: Int,
         panes: [(paneID: Int, cols: Int, rows: Int)]
     ) async {}
+    func resizePane(_ paneID: Int, direction: ResizeDirection, cells: Int) async {}
 }

@@ -315,6 +315,19 @@ final class TmuxSessionBackend: SessionBackend {
     /// `applyGrid`, but driven by what the chrome can actually
     /// fit — chrome-subtracted apportionment up front, exact
     /// targets to tmux at the end.
+    func resizePane(_ paneID: Int, direction: ResizeDirection, cells: Int) async {
+        guard cells > 0 else { return }
+        let flag: String = {
+            switch direction {
+            case .left:  return "-L"
+            case .right: return "-R"
+            case .up:    return "-U"
+            case .down:  return "-D"
+            }
+        }()
+        await write("resize-pane -t %\(paneID) \(flag) \(cells)\n")
+    }
+
     func applyWindowLayout(
         windowID: Int,
         cellCols: Int,

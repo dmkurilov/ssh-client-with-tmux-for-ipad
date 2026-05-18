@@ -278,6 +278,241 @@ struct LayoutCellNode: Equatable {
             return kids.flatMap { $0.paneIDs }
         }
     }
+
+    /// Return a copy of the tree where consecutive same-axis splits
+    /// are folded into a single N-ary split (vert(A, vert(B, C)) →
+    /// vert(A, B, C)). The leaf set and per-leaf cell counts are
+    /// preserved; only intermediate split nodes change. Used by
+    /// `PaneLayoutEngine.layout` so the per-leaf CP chrome is
+    /// counted once per leaf instead of once per nesting level.
+    /// Splits across different axes are *not* merged.
+    func flattenedSameAxisSplits() -> LayoutCellNode {
+        switch kind {
+        case .leaf:
+            return self
+        case .horizontal(let kids):
+            let flatKids = kids.map { $0.flattenedSameAxisSplits() }
+                .flatMap { kid -> [LayoutCellNode] in
+                    if case .horizontal(let inner) = kid.kind { return inner }
+                    return [kid]
+                }
+            return LayoutCellNode(cols: cols, rows: rows, kind: .horizontal(children: flatKids))
+        case .vertical(let kids):
+            let flatKids = kids.map { $0.flattenedSameAxisSplits() }
+                .flatMap { kid -> [LayoutCellNode] in
+                    if case .vertical(let inner) = kid.kind { return inner }
+                    return [kid]
+                }
+            return LayoutCellNode(cols: cols, rows: rows, kind: .vertical(children: flatKids))
+        }
+    }
+
+    /// Build a default cell tree mirroring a topology-only `PaneNode`.
+    /// Each leaf gets a small cell budget; splits sum across their
+    /// axis (including tmux's logical 1-cell border between siblings)
+    /// and use max on the perpendicular axis. Used by
+    /// `FakeSessionBackend` to give the demo a real `cellTree` so it
+    /// shares the engine-driven render path with the tmux backend.
+    static func defaultTree(from node: PaneNode, leafCols: Int = 40, leafRows: Int = 20) -> LayoutCellNode {
+        switch node {
+        case .leaf(let pid):
+            return LayoutCellNode(cols: leafCols, rows: leafRows, kind: .leaf(paneID: pid))
+        case .split(let dir, let kids):
+            let cellKids = kids.map { defaultTree(from: $0, leafCols: leafCols, leafRows: leafRows) }
+            switch dir {
+            case .horizontal:
+                let cols = cellKids.reduce(0) { $0 + $1.cols } + max(0, cellKids.count - 1)
+                let rows = cellKids.map(\.rows).max() ?? 0
+                return LayoutCellNode(cols: cols, rows: rows, kind: .horizontal(children: cellKids))
+            case .vertical:
+                let cols = cellKids.map(\.cols).max() ?? 0
+                let rows = cellKids.reduce(0) { $0 + $1.rows } + max(0, cellKids.count - 1)
+                return LayoutCellNode(cols: cols, rows: rows, kind: .vertical(children: cellKids))
+            }
+        }
+    }
+
+    /// Replace the leaf for `target` with a 2-child sub-split — the
+    /// original leaf plus a new leaf for `newID`. Each child gets
+    /// half of the original leaf's cells along the split axis;
+    /// siblings of the target are untouched. Used by the fake
+    /// backend's `splitPane` so a split doesn't reset every pane's
+    /// size (the prior `defaultTree(from:)` rebuild was wiping
+    /// custom cell counts on every layout edit).
+    func splittingPane(target: Int, direction: SplitDirection, newID: Int) -> LayoutCellNode {
+        switch kind {
+        case .leaf(let pid):
+            guard pid == target else { return self }
+            switch direction {
+            case .horizontal:
+                let firstCols = max(1, cols / 2)
+                // Spare 1 cell for tmux's logical border between siblings.
+                let secondCols = max(1, cols - firstCols - 1)
+                let first = LayoutCellNode(cols: firstCols, rows: rows, kind: .leaf(paneID: target))
+                let second = LayoutCellNode(cols: secondCols, rows: rows, kind: .leaf(paneID: newID))
+                return LayoutCellNode(cols: cols, rows: rows, kind: .horizontal(children: [first, second]))
+            case .vertical:
+                let firstRows = max(1, rows / 2)
+                let secondRows = max(1, rows - firstRows - 1)
+                let first = LayoutCellNode(cols: cols, rows: firstRows, kind: .leaf(paneID: target))
+                let second = LayoutCellNode(cols: cols, rows: secondRows, kind: .leaf(paneID: newID))
+                return LayoutCellNode(cols: cols, rows: rows, kind: .vertical(children: [first, second]))
+            }
+        case .horizontal(let kids):
+            return LayoutCellNode(
+                cols: cols, rows: rows,
+                kind: .horizontal(children: kids.map { $0.splittingPane(target: target, direction: direction, newID: newID) })
+            )
+        case .vertical(let kids):
+            return LayoutCellNode(
+                cols: cols, rows: rows,
+                kind: .vertical(children: kids.map { $0.splittingPane(target: target, direction: direction, newID: newID) })
+            )
+        }
+    }
+
+    /// Remove `paneID` from the tree, returning the pruned tree or
+    /// nil if no leaves remain. Splits with one child collapse to
+    /// that child so the tree doesn't accumulate degenerate nodes
+    /// over many kill / move operations. Mirrors `PaneNode.removingPane`
+    /// but preserves the cell counts of surviving leaves.
+    func removingPane(_ id: Int) -> LayoutCellNode? {
+        switch kind {
+        case .leaf(let pid):
+            return pid == id ? nil : self
+        case .horizontal(let kids):
+            let pruned = kids.compactMap { $0.removingPane(id) }
+            if pruned.isEmpty { return nil }
+            if pruned.count == 1 { return pruned[0] }
+            return LayoutCellNode(cols: cols, rows: rows, kind: .horizontal(children: pruned))
+        case .vertical(let kids):
+            let pruned = kids.compactMap { $0.removingPane(id) }
+            if pruned.isEmpty { return nil }
+            if pruned.count == 1 { return pruned[0] }
+            return LayoutCellNode(cols: cols, rows: rows, kind: .vertical(children: pruned))
+        }
+    }
+
+    /// Adjust the boundary between the pane containing `paneID` and
+    /// its sibling in `direction`, by `cells` cells. Used by the
+    /// fake backend's `resizePane` to honor drag gestures. Returns
+    /// the modified tree, or the original if no resize is possible
+    /// (e.g. `paneID` is missing, or there's no sibling in the
+    /// requested direction at any ancestor).
+    ///
+    /// The walk is bottom-up: we descend to the leaf, then on the
+    /// way back try to apply the resize at each enclosing split.
+    /// The *first* matching split (correct axis, has a sibling in
+    /// the requested direction) wins — that's typically the
+    /// shallowest split that owns the relevant edge. tmux's
+    /// `resize-pane -L|R|U|D` behaves the same way.
+    func resizingPane(_ paneID: Int, direction: ResizeDirection, cells: Int) -> LayoutCellNode {
+        guard cells != 0 else { return self }
+        let (result, applied) = Self.resizeWalk(self, paneID: paneID, direction: direction, cells: cells)
+        if applied { return result }
+        // Pane has no sibling in the requested direction at any
+        // level (e.g. bottom-most pane asked to grow .down). Retry
+        // the opposite direction so promotes still work for edge
+        // panes — the cells then come from the sibling on the
+        // *other* side instead.
+        let opposite: ResizeDirection
+        switch direction {
+        case .right: opposite = .left
+        case .left:  opposite = .right
+        case .down:  opposite = .up
+        case .up:    opposite = .down
+        }
+        let (retry, _) = Self.resizeWalk(self, paneID: paneID, direction: opposite, cells: cells)
+        return retry
+    }
+
+    private static func resizeWalk(
+        _ node: LayoutCellNode,
+        paneID: Int,
+        direction: ResizeDirection,
+        cells: Int
+    ) -> (node: LayoutCellNode, applied: Bool) {
+        switch node.kind {
+        case .leaf:
+            return (node, false)
+
+        case .horizontal(let kids):
+            return applyOrRecurse(
+                node: node,
+                kids: kids,
+                paneID: paneID,
+                direction: direction,
+                cells: cells,
+                isHorizontal: true
+            )
+
+        case .vertical(let kids):
+            return applyOrRecurse(
+                node: node,
+                kids: kids,
+                paneID: paneID,
+                direction: direction,
+                cells: cells,
+                isHorizontal: false
+            )
+        }
+    }
+
+    private static func applyOrRecurse(
+        node: LayoutCellNode,
+        kids: [LayoutCellNode],
+        paneID: Int,
+        direction: ResizeDirection,
+        cells: Int,
+        isHorizontal: Bool
+    ) -> (node: LayoutCellNode, applied: Bool) {
+        guard let idx = kids.firstIndex(where: { $0.paneIDs.contains(paneID) }) else {
+            return (node, false)
+        }
+        // 1. Descend first — the right split might be deeper.
+        var newKids = kids
+        let (descended, deeperApplied) = resizeWalk(newKids[idx], paneID: paneID, direction: direction, cells: cells)
+        newKids[idx] = descended
+        let kind: Kind = isHorizontal ? .horizontal(children: newKids) : .vertical(children: newKids)
+        if deeperApplied {
+            return (LayoutCellNode(cols: node.cols, rows: node.rows, kind: kind), true)
+        }
+        // 2. Deeper didn't apply. Try at this level if axis matches.
+        let axisMatches = isHorizontal
+            ? (direction == .left || direction == .right)
+            : (direction == .up || direction == .down)
+        guard axisMatches else {
+            return (LayoutCellNode(cols: node.cols, rows: node.rows, kind: kind), false)
+        }
+        let siblingIdx: Int?
+        switch direction {
+        case .right, .down: siblingIdx = (idx + 1 < kids.count) ? idx + 1 : nil
+        case .left, .up:    siblingIdx = (idx > 0) ? idx - 1 : nil
+        }
+        guard let siblingIdx else {
+            return (LayoutCellNode(cols: node.cols, rows: node.rows, kind: kind), false)
+        }
+        // 3. We can apply. Adjust the matching pair.
+        if isHorizontal {
+            newKids[idx] = bump(newKids[idx], deltaCols: cells)
+            newKids[siblingIdx] = bump(newKids[siblingIdx], deltaCols: -cells)
+        } else {
+            newKids[idx] = bump(newKids[idx], deltaRows: cells)
+            newKids[siblingIdx] = bump(newKids[siblingIdx], deltaRows: -cells)
+        }
+        let appliedKind: Kind = isHorizontal ? .horizontal(children: newKids) : .vertical(children: newKids)
+        return (LayoutCellNode(cols: node.cols, rows: node.rows, kind: appliedKind), true)
+    }
+
+    private static func bump(_ node: LayoutCellNode, deltaCols: Int = 0, deltaRows: Int = 0) -> LayoutCellNode {
+        // Floor at 1 cell so we don't produce zero-size subtrees.
+        // Engine's hidden-flag logic handles "below min" rendering.
+        return LayoutCellNode(
+            cols: max(1, node.cols + deltaCols),
+            rows: max(1, node.rows + deltaRows),
+            kind: node.kind
+        )
+    }
 }
 
 struct WindowInfo: Identifiable, Equatable {

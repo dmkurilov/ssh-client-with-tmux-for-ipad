@@ -44,6 +44,7 @@ final class FakeSessionBackend: SessionBackend {
             id: newWindowID(),
             name: "demo",
             layout: layout,
+            cellTree: LayoutCellNode.defaultTree(from: layout),
             activePaneID: initialPaneIDs.first
         )
         state.sessionName = "demo"
@@ -79,6 +80,14 @@ final class FakeSessionBackend: SessionBackend {
         // the original target plus the new pane — leaves siblings
         // alone. iTerm2-style nesting falls out of repeated splits.
         win.layout = win.layout.splitting(target: target, direction: direction, newID: newPID)
+        // Mutate cellTree by splitting *just* the target leaf, so
+        // sibling cell counts are preserved. Falls back to a fresh
+        // defaultTree only if cellTree is somehow missing.
+        if let tree = win.cellTree {
+            win.cellTree = tree.splittingPane(target: target, direction: direction, newID: newPID)
+        } else {
+            win.cellTree = LayoutCellNode.defaultTree(from: win.layout)
+        }
         win.activePaneID = newPID
         state.windows[widx] = win
         FileLogger.shared.log("FakeSession.splitPane \(direction) target=%\(target) → new=%\(newPID)")
@@ -93,6 +102,8 @@ final class FakeSessionBackend: SessionBackend {
             var w = state.windows[i]
             if let pruned = w.layout.removingPane(paneID) {
                 w.layout = pruned
+                w.cellTree = w.cellTree?.removingPane(paneID)
+                    ?? LayoutCellNode.defaultTree(from: pruned)
                 if w.activePaneID == paneID {
                     w.activePaneID = pruned.allPaneIDs.first
                 }
@@ -120,10 +131,12 @@ final class FakeSessionBackend: SessionBackend {
         let pid = newPaneID()
         panes[pid] = EchoPaneBackend(id: pid, echoDelay: echoDelay)
         let wid = newWindowID()
+        let leaf: PaneNode = .leaf(paneID: pid)
         let win = WindowInfo(
             id: wid,
             name: nil,
-            layout: .leaf(paneID: pid),
+            layout: leaf,
+            cellTree: LayoutCellNode.defaultTree(from: leaf),
             activePaneID: pid
         )
         state.windows.append(win)
@@ -161,6 +174,62 @@ final class FakeSessionBackend: SessionBackend {
         state.sessionName = newName
     }
 
+    func resizePane(_ paneID: Int, direction: ResizeDirection, cells: Int) async {
+        guard cells != 0 else { return }
+        guard let widx = state.windows.firstIndex(where: { $0.paneIDs.contains(paneID) }) else { return }
+        var win = state.windows[widx]
+        guard let tree = win.cellTree else { return }
+        let newTree = tree.resizingPane(paneID, direction: direction, cells: cells)
+        win.cellTree = newTree
+        state.windows[widx] = win
+        FileLogger.shared.log("FakeSession.resizePane %\(paneID) \(direction) \(cells)")
+    }
+
+    func applyPaneLayout(_ entries: [(paneID: Int, cols: Int, rows: Int)]) async {
+        // Translate absolute (cols, rows) targets into signed deltas
+        // and apply each via the cellTree's `resizingPane`. The
+        // direction we pick is arbitrary among the four — the walk
+        // inside `resizingPane` climbs to the first ancestor split
+        // whose axis matches and which has a sibling in the
+        // requested direction, so .right / .down do the right thing
+        // even for panes at the right/bottom edge.
+        for entry in entries {
+            guard let widx = state.windows.firstIndex(where: { $0.paneIDs.contains(entry.paneID) }) else { continue }
+            var win = state.windows[widx]
+            guard let tree = win.cellTree else { continue }
+            let current = Self.findLeafSize(in: tree, paneID: entry.paneID)
+            let deltaCols = entry.cols - (current?.cols ?? entry.cols)
+            let deltaRows = entry.rows - (current?.rows ?? entry.rows)
+            var newTree = tree
+            if deltaCols != 0 {
+                newTree = newTree.resizingPane(entry.paneID, direction: .right, cells: deltaCols)
+            }
+            if deltaRows != 0 {
+                newTree = newTree.resizingPane(entry.paneID, direction: .down, cells: deltaRows)
+            }
+            win.cellTree = newTree
+            state.windows[widx] = win
+        }
+        FileLogger.shared.log("FakeSession.applyPaneLayout entries=\(entries.count)")
+    }
+
+    /// Walk the cell tree to find a leaf's current cell size. Used by
+    /// `applyPaneLayout` to compute the signed delta for an absolute
+    /// resize target.
+    private static func findLeafSize(in tree: LayoutCellNode, paneID: Int) -> (cols: Int, rows: Int)? {
+        switch tree.kind {
+        case .leaf(let pid):
+            return pid == paneID ? (tree.cols, tree.rows) : nil
+        case .horizontal(let kids), .vertical(let kids):
+            for kid in kids {
+                if let found = findLeafSize(in: kid, paneID: paneID) {
+                    return found
+                }
+            }
+            return nil
+        }
+    }
+
     func paneTitle(_ paneID: Int) -> String? {
         guard panes[paneID] != nil else { return nil }
         return "echo pane %\(paneID) — \(echoDelay) round-trip"
@@ -196,6 +265,7 @@ final class FakeSessionBackend: SessionBackend {
             var w = state.windows[i]
             if let pruned = w.layout.removingPane(paneID) {
                 w.layout = pruned
+                w.cellTree = LayoutCellNode.defaultTree(from: pruned)
                 if !pruned.allPaneIDs.contains(w.activePaneID ?? -1) {
                     w.activePaneID = pruned.allPaneIDs.first
                 }
@@ -218,6 +288,7 @@ final class FakeSessionBackend: SessionBackend {
             direction: .horizontal,
             children: [dst.layout, .leaf(paneID: paneID)]
         )
+        dst.cellTree = LayoutCellNode.defaultTree(from: dst.layout)
         dst.activePaneID = paneID
         state.windows[dstIdx] = dst
         state.activeWindowID = windowID
@@ -240,6 +311,7 @@ final class FakeSessionBackend: SessionBackend {
             var w = state.windows[i]
             if let pruned = w.layout.removingPane(paneID) {
                 w.layout = pruned
+                w.cellTree = LayoutCellNode.defaultTree(from: pruned)
                 if !pruned.allPaneIDs.contains(w.activePaneID ?? -1) {
                     w.activePaneID = pruned.allPaneIDs.first
                 }
@@ -264,6 +336,7 @@ final class FakeSessionBackend: SessionBackend {
             : [.leaf(paneID: targetID), .leaf(paneID: paneID)]
         let replacement: PaneNode = .split(direction: direction, children: children)
         dst.layout = dst.layout.replacingLeaf(target: targetID, with: replacement)
+        dst.cellTree = LayoutCellNode.defaultTree(from: dst.layout)
         dst.activePaneID = paneID
         state.windows[dstIdx] = dst
         state.activeWindowID = dst.id

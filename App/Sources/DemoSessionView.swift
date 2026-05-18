@@ -1,7 +1,132 @@
 #if canImport(UIKit)
 import SwiftUI
+import UIKit
 import TerminalKit
 import ColorSchemes
+
+/// One drag handle, implemented as a single `UIView` that owns
+/// both the pan gesture *and* the pointer interaction. Earlier we
+/// had two layers (a SwiftUI `Color` with `.gesture` + a sibling
+/// `UIPointerInteraction` view in a `ZStack`); SwiftUI's gesture
+/// system intercepted hover events before they reached the
+/// embedded UIView, so the cursor never changed. Putting both in
+/// the same UIView fixes that.
+///
+/// `onDragChange` fires continuously during the gesture with the
+/// signed pixel delta along the drag axis. `onDragEnd` fires once
+/// when the gesture ends with the final delta. Finger users get
+/// the gesture; iPad pointer users also get the resize cursor.
+private struct PaneDividerHandle: UIViewRepresentable {
+    let axis: EngineDivider.Axis
+    let onDragChange: (CGFloat) -> Void
+    let onDragEnd: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = true
+        view.backgroundColor = .clear
+
+        let interaction = UIPointerInteraction(delegate: context.coordinator)
+        view.addInteraction(interaction)
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        // Touch + indirect pointer (trackpad/mouse) both fire pan.
+        pan.allowedScrollTypesMask = .continuous
+        view.addGestureRecognizer(pan)
+
+        context.coordinator.view = view
+        return view
+    }
+
+    func updateUIView(_: UIView, context: Context) {
+        context.coordinator.axis = axis
+        context.coordinator.onDragChange = onDragChange
+        context.coordinator.onDragEnd = onDragEnd
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(axis: axis, onDragChange: onDragChange, onDragEnd: onDragEnd)
+    }
+
+    final class Coordinator: NSObject, UIPointerInteractionDelegate {
+        var axis: EngineDivider.Axis
+        var onDragChange: (CGFloat) -> Void
+        var onDragEnd: (CGFloat) -> Void
+        weak var view: UIView?
+
+        init(axis: EngineDivider.Axis,
+             onDragChange: @escaping (CGFloat) -> Void,
+             onDragEnd: @escaping (CGFloat) -> Void)
+        {
+            self.axis = axis
+            self.onDragChange = onDragChange
+            self.onDragEnd = onDragEnd
+        }
+
+        func pointerInteraction(_ i: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+            let path = Self.makeDoubleArrowPath(axis: axis)
+            let constrainedAxes: UIAxis = (axis == .vertical) ? .horizontal : .vertical
+            return UIPointerStyle(shape: .path(path), constrainedAxes: constrainedAxes)
+        }
+
+        /// Double-arrow filled polygon — `↔` for vertical dividers
+        /// (drag horizontally), `↕` for horizontal dividers. Built
+        /// from a single closed path so the system fills it once and
+        /// gives the pointer a clear "this is a resize handle" feel.
+        /// The path is centered around `(0, 0)` as `UIPointerShape`
+        /// expects.
+        private static func makeDoubleArrowPath(axis: EngineDivider.Axis) -> UIBezierPath {
+            let arrowLen: CGFloat = 5     // length of each arrow head
+            let arrowFlare: CGFloat = 4   // half-thickness at the arrow's base
+            let barHalfLen: CGFloat = 5   // half-length of the connecting bar
+            let barHalfThick: CGFloat = 1 // half-thickness of the bar
+            let path = UIBezierPath()
+            switch axis {
+            case .vertical:
+                // ←─→ shape, horizontal axis.
+                path.move(to:    CGPoint(x: -(barHalfLen + arrowLen), y: 0))
+                path.addLine(to: CGPoint(x: -barHalfLen,              y: -arrowFlare))
+                path.addLine(to: CGPoint(x: -barHalfLen,              y: -barHalfThick))
+                path.addLine(to: CGPoint(x: barHalfLen,               y: -barHalfThick))
+                path.addLine(to: CGPoint(x: barHalfLen,               y: -arrowFlare))
+                path.addLine(to: CGPoint(x: barHalfLen + arrowLen,    y: 0))
+                path.addLine(to: CGPoint(x: barHalfLen,               y: arrowFlare))
+                path.addLine(to: CGPoint(x: barHalfLen,               y: barHalfThick))
+                path.addLine(to: CGPoint(x: -barHalfLen,              y: barHalfThick))
+                path.addLine(to: CGPoint(x: -barHalfLen,              y: arrowFlare))
+                path.close()
+            case .horizontal:
+                // ↑─↓ shape, vertical axis (same path, transposed).
+                path.move(to:    CGPoint(x: 0,           y: -(barHalfLen + arrowLen)))
+                path.addLine(to: CGPoint(x: -arrowFlare, y: -barHalfLen))
+                path.addLine(to: CGPoint(x: -barHalfThick, y: -barHalfLen))
+                path.addLine(to: CGPoint(x: -barHalfThick, y: barHalfLen))
+                path.addLine(to: CGPoint(x: -arrowFlare, y: barHalfLen))
+                path.addLine(to: CGPoint(x: 0,           y: barHalfLen + arrowLen))
+                path.addLine(to: CGPoint(x: arrowFlare,  y: barHalfLen))
+                path.addLine(to: CGPoint(x: barHalfThick, y: barHalfLen))
+                path.addLine(to: CGPoint(x: barHalfThick, y: -barHalfLen))
+                path.addLine(to: CGPoint(x: arrowFlare,  y: -barHalfLen))
+                path.close()
+            }
+            return path
+        }
+
+        @objc func handlePan(_ gr: UIPanGestureRecognizer) {
+            guard let view else { return }
+            let translation = gr.translation(in: view)
+            let delta: CGFloat = axis == .vertical ? translation.x : translation.y
+            switch gr.state {
+            case .changed:
+                onDragChange(delta)
+            case .ended, .cancelled, .failed:
+                onDragEnd(delta)
+            default:
+                break
+            }
+        }
+    }
+}
 
 /// SwiftUI view that talks only to a `SessionBackend`. Lays out the
 /// chrome described in `docs/05-ui-vision.md` §3 — top toolbar, tab
@@ -104,8 +229,22 @@ struct DemoSessionView: View {
     /// hidden flag) for the *active* window. Mirror of
     /// `layoutCache[activeWindowID].layouts`.
     @State private var paneFinalLayouts: [PaneFinalLayout] = []
+    /// Active window's draggable boundaries between panes. Mirror
+    /// of `layoutCache[activeWindowID].dividers`. Rendered as
+    /// invisible 8pt-thick gesture overlays.
+    @State private var paneDividers: [EngineDivider] = []
     /// Measured pane-area pixel size from the inner GeometryReader.
     @State private var paneAreaSize: CGSize = .zero
+    /// Drag state for the currently-active divider, if any. Lives
+    /// only between drag-begin and drop; `nil` outside that window.
+    /// `previewOffset` is the proposed pixel delta along the drag
+    /// axis — converted to cells on drop.
+    @State private var activeDividerDrag: DividerDragState? = nil
+
+    private struct DividerDragState: Equatable {
+        let divider: EngineDivider
+        var previewOffset: CGFloat
+    }
     /// Per-window cache of engine output. Avoids re-running the
     /// engine — and re-issuing per-pane `resize-pane` to tmux —
     /// every time the user taps a tab. Without this, tmux's
@@ -123,6 +262,7 @@ struct DemoSessionView: View {
         let topology: LayoutCellNode
         let paneArea: CGSize
         let layouts: [PaneFinalLayout]
+        let dividers: [EngineDivider]
     }
 
     /// Color for the 1pt strip between adjacent panes. Contrasts
@@ -527,6 +667,7 @@ struct DemoSessionView: View {
             // "new tab shows the old tab's content" bug.
             if isActive {
                 if !paneFinalLayouts.isEmpty { paneFinalLayouts = [] }
+                if !paneDividers.isEmpty { paneDividers = [] }
                 if !gridReady { gridReady = true }
             }
             return
@@ -534,15 +675,14 @@ struct DemoSessionView: View {
         // Cache hit: same window, same topology, same pane area.
         // Drift in cell counts is *expected* (tmux's resize-pane is
         // sequential and our chrome math eats a few cells per
-        // split), so we ignore it. External resize handling — when
-        // another client moves a divider — is *not* covered here;
-        // that's a future addition. For now, persistence wins.
+        // split), so we ignore it.
         if let cached = layoutCache[win.id],
            cached.paneArea == paneAreaSize,
            Self.sameTopology(cached.topology, tree)
         {
             if isActive {
                 paneFinalLayouts = cached.layouts
+                paneDividers = cached.dividers
                 if !gridReady { gridReady = true }
             }
             return
@@ -556,14 +696,27 @@ struct DemoSessionView: View {
         layoutCache[win.id] = CachedWindowLayout(
             topology: tree,
             paneArea: paneAreaSize,
-            layouts: output.layouts
+            layouts: output.layouts,
+            dividers: output.dividers
         )
+        // Gate the spinner only on the *first* layout for this
+        // window — i.e. when we have no prior layouts to show.
+        // Subsequent cache misses (a resize, a split, a nav-driven
+        // promote) update the existing layout in place. Toggling
+        // gridReady false→true on every cellTree change was forcing
+        // SwiftUI to swap `paneAreaContent` branches (engineDriven
+        // → ProgressView → engineDriven), which tears down every
+        // TerminalHost. With many rapid navs the SwiftTerm churn
+        // accumulated faster than ARC could keep up and brought
+        // the simulator to its knees.
+        let wasEmpty = isActive && paneFinalLayouts.isEmpty
         if isActive {
             paneFinalLayouts = output.layouts
+            paneDividers = output.dividers
+            if wasEmpty { gridReady = false }
         }
         let entries = output.layouts.map { (paneID: $0.paneID, cols: $0.cellCols, rows: $0.cellRows) }
         FileLogger.shared.log("Demo: engine for @\(win.id) → window=\(output.windowCellCols)x\(output.windowCellRows) panes: \(entries.map { "%\($0.paneID)=\($0.cols)x\($0.rows)" }.joined(separator: " "))")
-        if isActive { gridReady = false }
         Task {
             await backend.applyWindowLayout(
                 windowID: win.id,
@@ -572,7 +725,7 @@ struct DemoSessionView: View {
                 panes: entries
             )
             await MainActor.run {
-                if isActive { self.gridReady = true }
+                if isActive && !self.gridReady { self.gridReady = true }
             }
         }
     }
@@ -627,7 +780,13 @@ struct DemoSessionView: View {
         let active = paneNavBlink ? nil : win.activePaneID
         ZStack(alignment: .topLeading) {
             paneSeparator
-            ForEach(paneFinalLayouts.filter { !$0.hidden }, id: \.paneID) { p in
+            // Render every pane the engine apportioned, including
+            // panes flagged `hidden=true`. Filtering them out left
+            // the apportioned space empty — the grey strip at the
+            // bottom of screen-109. The `hidden` flag is still
+            // useful for nav 2b (where we promote a too-small
+            // target), but mounting is unconditional.
+            ForEach(paneFinalLayouts, id: \.paneID) { p in
                 let outer = p.outerRect
                 let rect = PaneCellRect(
                     paneID: p.paneID,
@@ -643,8 +802,127 @@ struct DemoSessionView: View {
                 .frame(width: outer.width, height: outer.height)
                 .position(x: outer.midX, y: outer.midY)
             }
+            // Drag handles sit on top of the panes so touches land
+            // on the divider's hit rect instead of the
+            // SwiftTermView underneath.
+            ForEach(Array(paneDividers.enumerated()), id: \.offset) { _, divider in
+                dragHandle(for: divider)
+            }
+            // Live preview overlay: a thin colored bar at the
+            // *proposed* divider position while the user drags. The
+            // panes themselves don't move until drop.
+            if let drag = activeDividerDrag {
+                dividerPreview(drag)
+            }
         }
         .frame(width: area.width, height: area.height, alignment: .topLeading)
+    }
+
+    /// One draggable handle for a divider — implemented as a
+    /// single UIKit view (`PaneDividerHandle`) so the pan gesture
+    /// and the pointer interaction live on the same responder.
+    /// Pointer-equipped iPad users see a beam-shaped resize cursor
+    /// constrained to the drag axis; touch users get the pan
+    /// gesture as usual. The preview overlay is driven from
+    /// `activeDividerDrag`.
+    @ViewBuilder
+    private func dragHandle(for divider: EngineDivider) -> some View {
+        PaneDividerHandle(
+            axis: divider.axis,
+            onDragChange: { delta in
+                activeDividerDrag = DividerDragState(divider: divider, previewOffset: delta)
+            },
+            onDragEnd: { delta in
+                commitDividerDrag(divider, deltaPoints: delta)
+                activeDividerDrag = nil
+            }
+        )
+        .frame(width: divider.hitRect.width, height: divider.hitRect.height)
+        .position(x: divider.hitRect.midX, y: divider.hitRect.midY)
+    }
+
+    /// Translates the pixel delta into cell delta, decides which
+    /// pane to push and in what direction, invalidates the cache for
+    /// this window so the engine re-runs on the new sizes, and
+    /// fires `backend.resizePane`. tmux may reject; we accept.
+    private func commitDividerDrag(_ divider: EngineDivider, deltaPoints: CGFloat) {
+        let cellSize = divider.axis == .vertical
+            ? cellMetrics.cellWidth
+            : cellMetrics.cellHeight
+        let deltaCells = Int(deltaPoints / cellSize)
+        guard deltaCells != 0 else { return }
+        // Pick the reference pane and direction. For a vertical
+        // divider: drag-right (positive delta) pushes the *left*
+        // pane's right edge right; drag-left pushes the *right*
+        // pane's left edge left.
+        let target: Int
+        let direction: ResizeDirection
+        switch divider.axis {
+        case .vertical:
+            if deltaCells > 0 {
+                target = divider.beforePaneID
+                direction = .right
+            } else {
+                target = divider.afterPaneID
+                direction = .left
+            }
+        case .horizontal:
+            if deltaCells > 0 {
+                target = divider.beforePaneID
+                direction = .down
+            } else {
+                target = divider.afterPaneID
+                direction = .up
+            }
+        }
+        let magnitude = abs(deltaCells)
+        if let winID = backend.state.activeWindowID {
+            // Cache stays warm on same-topology, but the sizes we
+            // get back from tmux will be different — and we need
+            // the engine to re-flow against the new tree. Drop the
+            // cached entry for this window so the next cellTree
+            // change misses and re-engineers.
+            layoutCache.removeValue(forKey: winID)
+        }
+        FileLogger.shared.log("Demo: drag %\(target) \(direction) \(magnitude) cells")
+        Task {
+            await backend.resizePane(target, direction: direction, cells: magnitude)
+            // For backends that mutate cellTree synchronously (fake),
+            // run the sync now to pick up the new layout. For tmux,
+            // the layout-change event will fire it.
+            await MainActor.run { syncAllWindowLayouts() }
+        }
+    }
+
+    /// A 2pt-thick colored line drawn at the proposed divider
+    /// position while the user drags. Doesn't actually resize the
+    /// panes — they snap on drop. Matches the visual you sketched
+    /// (preview while dragging, commit on drop).
+    @ViewBuilder
+    private func dividerPreview(_ drag: DividerDragState) -> some View {
+        let d = drag.divider
+        let previewRect: CGRect = {
+            switch d.axis {
+            case .vertical:
+                return CGRect(
+                    x: d.hitRect.midX + drag.previewOffset - 1,
+                    y: d.hitRect.minY,
+                    width: 2,
+                    height: d.hitRect.height
+                )
+            case .horizontal:
+                return CGRect(
+                    x: d.hitRect.minX,
+                    y: d.hitRect.midY + drag.previewOffset - 1,
+                    width: d.hitRect.width,
+                    height: 2
+                )
+            }
+        }()
+        Color.accentColor
+            .frame(width: previewRect.width, height: previewRect.height)
+            .position(x: previewRect.midX, y: previewRect.midY)
+            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -1142,17 +1420,85 @@ struct DemoSessionView: View {
         guard let pid = backend.state.activePaneID,
               let win = backend.state.activeWindow
         else { return }
-        if let next = win.layout.neighbor(of: pid, direction: direction) {
-            Task { await backend.selectPane(next) }
-            FileLogger.shared.log("⌘⌥\(direction) %\(pid) → %\(next)")
+        // 1. Try the immediate neighbor.
+        // 2. If we're at the edge, wrap to the farthest pane in the
+        //    *opposite* direction (left arrow at leftmost pane → go
+        //    to the rightmost pane).
+        let target = win.layout.neighbor(of: pid, direction: direction)
+            ?? Self.farthestOpposite(direction, excluding: pid, in: win.layout)
+        if let target, target != pid {
+            let targetWasHidden = paneFinalLayouts.contains { $0.paneID == target && $0.hidden }
+            FileLogger.shared.log("⌘⌥\(direction) %\(pid) → %\(target)\(targetWasHidden ? " (promote)" : "")")
+            if targetWasHidden {
+                // Swap semantics: target was hidden, so promote it
+                // to at least the min usable size. Cells come from
+                // its siblings (engine apportions; tmux may reject).
+                // The outgoing pane is not shrunk — leaving it
+                // alone keeps plain navs cheap and avoids cascading
+                // re-layouts that previously brought the simulator
+                // to a crawl.
+                if let winID = backend.state.activeWindowID {
+                    layoutCache.removeValue(forKey: winID)
+                }
+                Task {
+                    await promoteHiddenAsync(paneID: target)
+                    await backend.selectPane(target)
+                    await MainActor.run { syncAllWindowLayouts() }
+                }
+            } else {
+                // Plain visible→visible nav: just move focus. No
+                // resize, no engine churn, no SwiftUI tree rebuild
+                // beyond the active-pane border swap.
+                Task { await backend.selectPane(target) }
+            }
         } else {
-            // No neighbor — flash for 200ms as feedback.
+            // Single-pane window or no other pane to move to — brief
+            // visual feedback.
             paneNavBlink = true
-            FileLogger.shared.log("⌘⌥\(direction) %\(pid) — no neighbor (blink)")
+            FileLogger.shared.log("⌘⌥\(direction) %\(pid) — no target (blink)")
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(200))
                 paneNavBlink = false
             }
+        }
+    }
+
+    /// Push a hidden pane back above the visibility threshold by
+    /// resizing only the dimension(s) that are actually below the
+    /// minimum. Uses relative `resizePane` (a delta) rather than an
+    /// absolute target — the cellTree stores logical *weights*, not
+    /// the engine's apportioned cells, so feeding the engine's
+    /// cellCols back through `applyPaneLayout` would compute a
+    /// bogus delta and shift cols around every time. Relative deltas
+    /// only touch the axes we need to grow.
+    private func promoteHiddenAsync(paneID: Int) async {
+        guard let layout = paneFinalLayouts.first(where: { $0.paneID == paneID }) else { return }
+        let rowGap = PaneLayoutEngine.minRows - layout.cellRows
+        let colGap = PaneLayoutEngine.minCols - layout.cellCols
+        if rowGap > 0 {
+            await backend.resizePane(paneID, direction: .down, cells: rowGap + 5)
+        }
+        if colGap > 0 {
+            await backend.resizePane(paneID, direction: .right, cells: colGap + 10)
+        }
+    }
+
+    /// Pane *farthest in the opposite direction* of `direction`,
+    /// excluding `pid`. Used to wrap around when `neighbor()`
+    /// returned nil. For `.left`, that's the rightmost pane
+    /// (largest `maxX`); for `.up`, the bottom-most pane; etc.
+    private static func farthestOpposite(
+        _ direction: PaneNavigationDirection,
+        excluding pid: Int,
+        in layout: PaneNode
+    ) -> Int? {
+        let rects = layout.paneRects().filter { $0.id != pid }
+        guard !rects.isEmpty else { return nil }
+        switch direction {
+        case .left:  return rects.max(by: { $0.frame.maxX < $1.frame.maxX })?.id
+        case .right: return rects.min(by: { $0.frame.minX < $1.frame.minX })?.id
+        case .up:    return rects.max(by: { $0.frame.maxY < $1.frame.maxY })?.id
+        case .down:  return rects.min(by: { $0.frame.minY < $1.frame.minY })?.id
         }
     }
 

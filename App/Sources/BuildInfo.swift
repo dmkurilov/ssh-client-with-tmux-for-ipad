@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-14c — soft keyboard removed; HW keys only (custom keyboard returns later)"
+    static let signature = "2026-05-18a — promote only resizes the axis below min, harder dim on inactive caret"
 }

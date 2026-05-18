@@ -378,6 +378,24 @@ public struct SwiftTermView: UIViewRepresentable {
         }
         if let scheme {
             ColorSchemeApply.apply(scheme, to: host.terminalView)
+            // Active pane shows the scheme's full-opacity caret.
+            // Inactive panes get a dimmed (alpha 0.3) version of
+            // the same color — still visible as a block so the
+            // user can see where the cursor sits, but clearly
+            // de-emphasized so the active pane stands out. iTerm2
+            // uses a hollow stroke for inactive; SwiftTerm doesn't
+            // natively support that shape, so dimming is the v1.
+            let c = scheme.cursor
+            let solid = UIColor(red: CGFloat(c.red), green: CGFloat(c.green), blue: CGFloat(c.blue), alpha: CGFloat(c.alpha))
+            // Active gets the scheme's full-opacity caret; inactive
+            // is faded hard so the user can tell at a glance which
+            // pane is focused. SwiftTerm's RenderOnlyTerminalView
+            // never becomes first responder, so the *shape* of the
+            // caret is always SwiftTerm's "unfocused" stroke — only
+            // the color and opacity differ. v2 should swap the shape
+            // (solid for active, hollow for inactive) but that needs
+            // SwiftTerm API we don't currently expose.
+            host.terminalView.caretColor = isActive ? solid : solid.withAlphaComponent(0.12)
         }
         host.onInput = onInput
         host.onNavigatePane = onNavigatePane
