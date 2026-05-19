@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-19f — SSH pump uses inherited MainActor (no detached cross-actor capture)"
+    static let signature = "2026-05-19i — proportionalPanes also hides control bar in single mode"
 }

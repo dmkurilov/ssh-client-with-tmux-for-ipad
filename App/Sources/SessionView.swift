@@ -975,6 +975,7 @@ struct SessionView: View {
                 paneCell(
                     paneID: entry.id,
                     isActive: entry.id == active,
+                    showControlBar: !isSingleMode,
                     cellRect: nil,
                     fallbackPixelSize: f.size
                 )
@@ -1366,23 +1367,30 @@ struct SessionView: View {
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
 
-            // Everything below is multiplex-only — splits, tabs, pane
-            // nav, zoom. In `.single` mode the backend can't service
-            // any of them, so we skip registering the shortcuts and
-            // the corresponding menu entries.
-            if !isSingleMode {
+            // Everything below is multiplex-only — splits, tabs,
+            // pane nav, zoom. `.disabled(isSingleMode)` keeps the
+            // view tree stable between `.multiplex` and `.single`
+            // (an earlier `if !isSingleMode { ... }` wrapper produced
+            // a `_ConditionalContent` whose empty branch
+            // de-registered `⌘⇧F` in single mode — Find +
+            // Toggle-fullscreen are *outside* this gate but
+            // SwiftUI's shortcut binding still drifted). `.disabled`
+            // skips the action *and* the keyCommand, but the view
+            // identity stays put.
             Button("Toggle pane zoom") {
                 guard let target = backend.state.activePaneID else { return }
                 Task { await backend.toggleZoom(paneID: target) }
                 FileLogger.shared.log("Demo: ⌘⇧Enter zoom %\(target)")
             }
             .keyboardShortcut(.return, modifiers: [.command, .shift])
+            .disabled(isSingleMode)
 
             Button("Toggle tab strip") {
                 tabsVisible.toggle()
                 FileLogger.shared.log("Demo: ⌘⇧T tabs → \(tabsVisible)")
             }
             .keyboardShortcut("t", modifiers: [.command, .shift])
+            .disabled(isSingleMode)
 
             Button("Split right") {
                 guard let target = backend.state.activePaneID,
@@ -1392,6 +1400,7 @@ struct SessionView: View {
                 FileLogger.shared.log("Demo: ⌘D split-right")
             }
             .keyboardShortcut("d", modifiers: .command)
+            .disabled(isSingleMode)
 
             Button("Split down") {
                 guard let target = backend.state.activePaneID,
@@ -1401,6 +1410,7 @@ struct SessionView: View {
                 FileLogger.shared.log("Demo: ⌘⇧D split-down")
             }
             .keyboardShortcut("d", modifiers: [.command, .shift])
+            .disabled(isSingleMode)
 
             Button("Close pane") {
                 guard let target = backend.state.activePaneID else { return }
@@ -1408,12 +1418,14 @@ struct SessionView: View {
                 FileLogger.shared.log("Demo: ⌘W close-pane")
             }
             .keyboardShortcut("w", modifiers: .command)
+            .disabled(isSingleMode)
 
             Button("New tab") {
                 Task { await backend.newWindow() }
                 FileLogger.shared.log("Demo: ⌘T new-tab")
             }
             .keyboardShortcut("t", modifiers: .command)
+            .disabled(isSingleMode)
 
             // ⌘1..⌘9 → jump to tab N (1-based). Out-of-range
             // shortcuts no-op; we don't shift to "last tab" because
@@ -1430,6 +1442,7 @@ struct SessionView: View {
                     FileLogger.shared.log("Demo: ⌘\(idx) → @\(target)")
                 }
                 .keyboardShortcut(KeyEquivalent(Character("\(idx)")), modifiers: .command)
+                .disabled(isSingleMode)
             }
 
             // ⌘⌥+arrow → spatial pane navigation. Edges no-op
@@ -1438,19 +1451,22 @@ struct SessionView: View {
                 navigatePane(.right)
             }
             .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            .disabled(isSingleMode)
             Button("Pane left") {
                 navigatePane(.left)
             }
             .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            .disabled(isSingleMode)
             Button("Pane up") {
                 navigatePane(.up)
             }
             .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            .disabled(isSingleMode)
             Button("Pane down") {
                 navigatePane(.down)
             }
             .keyboardShortcut(.downArrow, modifiers: [.command, .option])
-            } // end if !isSingleMode
+            .disabled(isSingleMode)
         }
         .opacity(0)
         .allowsHitTesting(false)

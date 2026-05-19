@@ -246,6 +246,25 @@ final class TmuxSessionBackend: SessionBackend {
     }
 
     func toggleZoom(paneID: Int) async {
+        // Optimistic local toggle so the UI flips immediately when
+        // the user hits ⌘⇧Enter. Without this, `state.zoomedPaneID`
+        // would only ever be `nil` for the tmux backend — `SessionView`
+        // checks that field to decide whether to render a single
+        // fullscreen pane or the engine-driven multi-pane layout, so
+        // the visual zoom never landed even though the `resize-pane
+        // -Z` round-trip succeeded server-side.
+        //
+        // tmux is still the source of truth for actual cell sizing
+        // (the `%layout-change` reply re-flows the window's
+        // `cellTree`); we just don't have a clean signal for the
+        // zoom *flag* from `%layout-change` itself, so we mirror
+        // FakeSessionBackend's behavior and trust the toggle locally.
+        if state.zoomedPaneID == paneID {
+            state.zoomedPaneID = nil
+        } else {
+            state.zoomedPaneID = paneID
+        }
+        FileLogger.shared.log("TmuxBackend.toggleZoom %\(paneID) → \(state.zoomedPaneID.map { "%\($0)" } ?? "off")")
         await write("resize-pane -Z -t %\(paneID)\n")
     }
 
