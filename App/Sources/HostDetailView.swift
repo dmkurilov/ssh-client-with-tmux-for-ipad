@@ -49,7 +49,7 @@ struct HostDetailView: View {
                 .disabled(isRunning || !hasKey)
 
                 NavigationLink {
-                    RemoteShellView(host: host, tofu: tofu, settings: settings, keyStore: keyStore)
+                    SSHBackendSessionView(host: host, tofu: tofu, settings: settings, keyStore: keyStore)
                 } label: {
                     Text("Open shell")
                 }
