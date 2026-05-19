@@ -4,7 +4,7 @@ import CoreGraphics
 import TerminalKit
 
 /// Per-pane chrome that the engine must subtract before doing any
-/// cell math. All values in points. Sourced from `DemoSessionView`
+/// cell math. All values in points. Sourced from `SessionView`
 /// — the actual values it uses to render the pane control panel,
 /// borders, and inner margins — so the engine and the renderer
 /// agree on the chrome budget pixel-for-pixel.
@@ -364,7 +364,7 @@ enum PaneLayoutEngine {
     /// minimum as hidden. The cell counts themselves are *not*
     /// clamped — we send the engine's natural output to tmux and
     /// let tmux's own minimums apply. The hidden flag is a
-    /// rendering-only decision: `DemoSessionView` skips mounting a
+    /// rendering-only decision: `SessionView` skips mounting a
     /// SwiftTermView for hidden panes, but the per-pane driver keeps
     /// buffering bytes so the pane comes back instantly when room
     /// opens up.

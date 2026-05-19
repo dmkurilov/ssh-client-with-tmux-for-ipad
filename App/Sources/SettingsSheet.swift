@@ -147,10 +147,10 @@ struct SettingsSheet: View {
             // keyboard shortcuts (⌘D, ⌘W, ⌘T) didn't reach the demo's
             // hidden shortcut sink — the `.fullScreenCover` was outside
             // any nav-stack responder context. The system nav bar is
-            // hidden by `DemoSessionView` itself.
+            // hidden by `SessionView` itself.
             .fullScreenCover(isPresented: $showingDemo) {
                 NavigationStack {
-                    DemoSessionView(
+                    SessionView(
                         backend: FakeSessionBackend(echoDelay: .seconds(1), paneCount: 2),
                         scheme: settings.selectedScheme,
                         onClose: { showingDemo = false }

@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-18d — dim inactive panes with a non-transparent overlay (iTerm2-style)"
+    static let signature = "2026-05-19d — bootstrap activePane heuristic now scoped to the active window's leaves"
 }

@@ -589,13 +589,27 @@ struct WindowInfo: Identifiable, Equatable {
 /// horizontal *divider* (panes **stacked**). The case name refers
 /// to the orientation of the *split motion*, which is opposite to
 /// the iTerm2 menu vocabulary ("Split Vertically" = side-by-side,
-/// = our `.horizontal`). User-facing labels in `DemoSessionView`
+/// = our `.horizontal`). User-facing labels in `SessionView`
 /// follow iTerm2.
 enum SplitDirection: Equatable {
     /// Side by side, vertical divider. tmux `-h`.
     case horizontal
     /// Stacked, horizontal divider. tmux `-v`.
     case vertical
+}
+
+/// Multiplexing capability of the underlying backend. The view
+/// reads this to decide whether to render tabs, pane control bars,
+/// drag handles, and split-related keyboard shortcuts.
+///
+/// - `.multiplex`: full chrome. Backed by `FakeSessionBackend` for
+///   the demo and `TmuxSessionBackend` for real tmux-CC sessions.
+/// - `.single`: pure SSH or any other backend that only ever has
+///   one window with one pane. No tabs, no control bar, no
+///   ⌘D/⌘W/⌘T/⌘⌥arrow shortcuts. The terminal fills the screen.
+enum SessionMode: Equatable {
+    case multiplex
+    case single
 }
 
 /// Observable model the views read from. Each `SessionBackend`
@@ -609,6 +623,11 @@ enum SplitDirection: Equatable {
 @MainActor
 @Observable
 final class SessionState {
+    /// Set once at backend init. The view branches on this to hide
+    /// multiplexing chrome (tabs, control bar, shortcuts) for
+    /// `.single`. Backends declare their own capability; the view
+    /// never inspects backend type.
+    var mode: SessionMode = .multiplex
     var sessionName: String?
     var sessionID: Int?
     var windows: [WindowInfo] = []

@@ -83,7 +83,7 @@ protocol SessionBackend: AnyObject {
 
     /// Push a window grid size to the backend's source of truth and
     /// recapture every pane's grid into our local renderer. The
-    /// only caller is the chrome (`DemoSessionView`) once it has
+    /// only caller is the chrome (`SessionView`) once it has
     /// measured its pane area — the backend is then responsible for
     /// telling tmux (or whatever underlies it) about the new grid
     /// and reconciling the local grids to match. Default no-op so
@@ -115,7 +115,7 @@ protocol SessionBackend: AnyObject {
     /// Push a pane's edge by `cells` cells in `direction`. The
     /// pane's container split absorbs the change — sibling on the
     /// pushed side grows/shrinks correspondingly. Used by the drag
-    /// handle UI in `DemoSessionView`. For tmux this maps to
+    /// handle UI in `SessionView`. For tmux this maps to
     /// `resize-pane -t %X -L|-R|-U|-D N`; for the demo's fake
     /// backend it mutates the in-memory cell tree directly. Default
     /// no-op for backends without resize.

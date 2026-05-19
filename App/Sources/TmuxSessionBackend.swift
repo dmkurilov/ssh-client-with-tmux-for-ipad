@@ -9,7 +9,7 @@ import TerminalKit
 /// and an `SSHShellSession` (the control channel). Translates
 /// `SessionBackend` verbs into tmux commands written to the
 /// shell, and mirrors `TmuxSession`'s observable state into a
-/// `SessionState` that the new chrome (`DemoSessionView`-style)
+/// `SessionState` that the new chrome (`SessionView`-style)
 /// reads.
 ///
 /// Lifecycle:
@@ -424,7 +424,7 @@ final class TmuxSessionBackend: SessionBackend {
         guard cols > 0, rows > 0, let shell else { return }
         FileLogger.shared.log("TmuxBackend.applyGrid request \(cols)x\(rows)")
         await write("refresh-client -C \(cols)x\(rows)\n")
-        // First-call race: DemoSessionView may fire `applyGrid`
+        // First-call race: SessionView may fire `applyGrid`
         // before tmux's `%session-window-changed` has populated
         // `state.activeWindowID`. If so, refresh layout once to
         // learn it, then issue the resize and refresh again.

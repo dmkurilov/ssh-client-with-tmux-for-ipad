@@ -135,7 +135,7 @@ private struct PaneDividerHandle: UIViewRepresentable {
 ///
 /// Used for the demo against `FakeSessionBackend`; the real tmux
 /// path will swap the backend without touching this view.
-struct DemoSessionView: View {
+struct SessionView: View {
     /// Existential because views read state through `backend.state`
     /// (an `@Observable` `SessionState`). Reference identity carries
     /// observation; the protocol type is just dispatch.
@@ -153,6 +153,15 @@ struct DemoSessionView: View {
     var onClose: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+
+    /// True when the backend declared `.single` mode. SSH-only
+    /// backends collapse to one window + one pane and don't need
+    /// tabs, the per-pane control bar, or split-related keyboard
+    /// shortcuts. Driven off `backend.state.mode` so the view never
+    /// has to know which concrete backend it's talking to.
+    private var isSingleMode: Bool {
+        backend.state.mode == .single
+    }
 
     @State private var fullScreen: Bool = false
     @State private var tabsVisible: Bool = true
@@ -286,7 +295,7 @@ struct DemoSessionView: View {
                     topToolbar
                     Divider()
                 }
-                if tabsVisible {
+                if tabsVisible && !isSingleMode {
                     tabStrip
                         .frame(height: 44)
                         .background(Color(.secondarySystemBackground))
@@ -575,7 +584,7 @@ struct DemoSessionView: View {
                     .onAppear {
                         // Each fresh appearance gets a clean cache.
                         // Defensive: SwiftUI sometimes keeps the
-                        // same DemoSessionView identity across a
+                        // same SessionView identity across a
                         // disconnect/reconnect, which would leave
                         // stale per-window cached layouts from the
                         // previous tmux session. Clearing on appear
@@ -688,11 +697,18 @@ struct DemoSessionView: View {
             }
             return
         }
-        // Cache miss: compute fresh and send to tmux.
+        // Cache miss: compute fresh and send to tmux. In `.single`
+        // mode there's no per-pane control bar, so the engine must
+        // not reserve 28pt for it — otherwise the bottom strip of
+        // the terminal goes unused.
+        let chrome: LayoutChrome = isSingleMode
+            ? LayoutChrome(controlPanelPt: 0, borderPt: 0, marginPt: 0)
+            : .default
         let output = PaneLayoutEngine.layout(
             tree: tree,
             area: paneAreaSize,
-            cellMetrics: cellMetrics
+            cellMetrics: cellMetrics,
+            chrome: chrome
         )
         layoutCache[win.id] = CachedWindowLayout(
             topology: tree,
@@ -778,7 +794,13 @@ struct DemoSessionView: View {
 
     @ViewBuilder
     private func engineDrivenPanes(window win: WindowInfo, area: CGSize) -> some View {
-        let active = paneNavBlink ? nil : win.activePaneID
+        // Fall back to the first pane when tmux hasn't yet emitted a
+        // window-pane-changed event for this window. Tmux only sets
+        // its per-window active pane the first time the user
+        // interacts with that window; on attach a never-visited tab
+        // has `activePaneID == nil`. Without the fallback the user
+        // sees a tab with no highlighted pane.
+        let active = paneNavBlink ? nil : (win.activePaneID ?? win.paneIDs.first)
         ZStack(alignment: .topLeading) {
             paneSeparator
             // Render every pane the engine apportioned, including
@@ -797,6 +819,7 @@ struct DemoSessionView: View {
                 paneCell(
                     paneID: p.paneID,
                     isActive: p.paneID == active,
+                    showControlBar: !isSingleMode,
                     cellRect: rect,
                     fallbackPixelSize: outer.size
                 )
@@ -887,11 +910,19 @@ struct DemoSessionView: View {
         }
         FileLogger.shared.log("Demo: drag %\(target) \(direction) \(magnitude) cells")
         Task {
+            // Fire-and-forget: the backend's resizePane sends the
+            // relative resize-pane command (tmux) or mutates the
+            // cellTree directly (fake). In either case the cellTree
+            // change is observed via `.onChange(cellTree)` which
+            // re-runs the engine. We used to call
+            // `syncAllWindowLayouts()` here as well, but that race
+            // ran the engine *before* tmux's `%layout-change` reply
+            // arrived — apportioning stale weights, then
+            // `applyWindowLayout` sent the stale result back to
+            // tmux, which clobbered the user's drag. Without the
+            // immediate sync the drag's actual effect propagates
+            // through tmux → cellTree → engine → render naturally.
             await backend.resizePane(target, direction: direction, cells: magnitude)
-            // For backends that mutate cellTree synchronously (fake),
-            // run the sync now to pick up the new layout. For tmux,
-            // the layout-change event will fire it.
-            await MainActor.run { syncAllWindowLayouts() }
         }
     }
 
@@ -931,7 +962,12 @@ struct DemoSessionView: View {
         let entries: [PaneLayoutEntry] = win.layout
             .paneRects(in: CGRect(origin: .zero, size: area))
             .map { PaneLayoutEntry(id: $0.id, frame: $0.frame) }
-        let active = paneNavBlink ? nil : win.activePaneID
+        // Same fallback as `engineDrivenPanes`: on a never-visited
+        // window (e.g. the auto-attached active tab) tmux hasn't yet
+        // emitted a window-pane-changed event, so `activePaneID` is
+        // nil. Highlight the first pane (top-left in traversal
+        // order) until tmux tells us otherwise.
+        let active = paneNavBlink ? nil : (win.activePaneID ?? win.paneIDs.first)
         ZStack(alignment: .topLeading) {
             paneSeparator
             ForEach(entries) { entry in
@@ -1330,6 +1366,11 @@ struct DemoSessionView: View {
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
 
+            // Everything below is multiplex-only — splits, tabs, pane
+            // nav, zoom. In `.single` mode the backend can't service
+            // any of them, so we skip registering the shortcuts and
+            // the corresponding menu entries.
+            if !isSingleMode {
             Button("Toggle pane zoom") {
                 guard let target = backend.state.activePaneID else { return }
                 Task { await backend.toggleZoom(paneID: target) }
@@ -1409,6 +1450,7 @@ struct DemoSessionView: View {
                 navigatePane(.down)
             }
             .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            } // end if !isSingleMode
         }
         .opacity(0)
         .allowsHitTesting(false)
@@ -1560,7 +1602,7 @@ struct DemoSessionView: View {
 }
 
 #Preview {
-    DemoSessionView(
+    SessionView(
         backend: FakeSessionBackend(echoDelay: .seconds(1), paneCount: 2),
         scheme: BuiltInSchemes.all.first
     )

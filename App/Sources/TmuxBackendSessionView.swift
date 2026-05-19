@@ -6,7 +6,7 @@ import TmuxCC
 import TerminalKit
 
 /// New-chrome tmux session view. Owns the SSH/tmux connection
-/// lifecycle and renders the same `DemoSessionView`-style chrome
+/// lifecycle and renders the same `SessionView`-style chrome
 /// (top toolbar with fs/tb/kb, tab strip with rename + drag-drop,
 /// per-pane control bar, custom soft keyboard, ⌘⌥+arrow nav, etc.)
 /// against a real `TmuxSessionBackend`.
@@ -45,7 +45,7 @@ struct TmuxBackendSessionView: View {
     var body: some View {
         Group {
             if let backend {
-                DemoSessionView(
+                SessionView(
                     backend: backend,
                     scheme: settings.selectedScheme,
                     showFakeBadge: false,
@@ -400,7 +400,7 @@ struct TmuxBackendSessionView: View {
 
     /// Enumerate windows via `list-windows` so the chrome (tabs +
     /// active pane) has something to draw against. Per-pane content
-    /// is *not* fetched here anymore — `DemoSessionView` triggers
+    /// is *not* fetched here anymore — `SessionView` triggers
     /// `backend.applyGrid` once it knows its pane-area pixel size,
     /// and that's the single chokepoint that owns capture-pane (via
     /// the new suspend / `feedSnapshot` / resume sequencing). Doing

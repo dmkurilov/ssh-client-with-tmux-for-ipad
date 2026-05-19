@@ -32,7 +32,7 @@ import CoreGraphics
 /// `paneCell`, completing the "tap anywhere" coverage.
 ///
 /// **Drag payload format** matches the existing tab-drop wiring:
-/// `"pane:%<id>"` (see DemoSessionView's `paneControlBar`'s
+/// `"pane:%<id>"` (see SessionView's `paneControlBar`'s
 /// `.draggable`). Self-drops are rejected.
 struct PaneDropZone: View {
     let targetPaneID: Int

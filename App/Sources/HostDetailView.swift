@@ -56,7 +56,7 @@ struct HostDetailView: View {
                 .disabled(!hasKey)
 
                 NavigationLink {
-                    TmuxSessionView(
+                    TmuxBackendSessionView(
                         host: host,
                         tofu: tofu,
                         settings: settings,
@@ -69,7 +69,7 @@ struct HostDetailView: View {
                 .disabled(!hasKey)
 
                 NavigationLink {
-                    TmuxSessionView(
+                    TmuxBackendSessionView(
                         host: host,
                         tofu: tofu,
                         settings: settings,
@@ -79,19 +79,6 @@ struct HostDetailView: View {
                     )
                 } label: {
                     Text("List tmux sessions")
-                }
-                .disabled(!hasKey)
-
-                NavigationLink {
-                    TmuxBackendSessionView(
-                        host: host,
-                        tofu: tofu,
-                        settings: settings,
-                        store: store,
-                        keyStore: keyStore
-                    )
-                } label: {
-                    Label("Open tmux (new UI, beta)", systemImage: "sparkles")
                 }
                 .disabled(!hasKey)
             }

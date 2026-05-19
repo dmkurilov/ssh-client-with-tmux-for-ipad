@@ -370,13 +370,22 @@ final class TmuxSession {
 
             // Bootstrap heuristic: tmux often doesn't emit
             // `windowPaneChanged` for a pane that's already active
-            // when we attach. The first pane to emit output for the
-            // active window claims itself as the active pane until
-            // tmux says otherwise. Will be replaced by parsing
-            // `layoutChange` for proper window→pane mapping.
+            // when we attach. The first pane to emit output *for
+            // the active window* claims itself as the active pane
+            // until tmux says otherwise.
+            //
+            // The "for the active window" guard is load-bearing.
+            // Without it, ANY pane in ANY window (e.g. a background
+            // tab whose shell happens to emit a prompt redraw on
+            // attach) would set the active window's `activePaneID`
+            // to itself, leaving us with `activeWindow.activePaneID
+            // = <foreign paneID>`. The view's `p.paneID == active`
+            // check then fails for every pane in the active window,
+            // producing the "no active pane" rendering bug.
             if let wid = activeWindowID,
                let idx = windows.firstIndex(where: { $0.id == wid }),
-               windows[idx].activePaneID == nil
+               windows[idx].activePaneID == nil,
+               windows[idx].layout?.paneIDs.contains(paneID) == true
             {
                 var w = windows[idx]
                 w.activePaneID = paneID
