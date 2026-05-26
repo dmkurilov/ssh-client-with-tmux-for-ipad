@@ -178,8 +178,9 @@ struct HostDetailView: View {
     }
 
     private func loadCredentials() async throws -> Credentials {
-        let id = host.keyID ?? keyStore.keys.first?.id
-        guard let id else { throw NoKeyError() }
+        guard let id = keyStore.resolveKeyID(preferred: host.keyID) else {
+            throw NoKeyError()
+        }
         let (meta, data) = try await keyStore.load(
             id,
             prompt: "Authenticate to use SSH key for \(host.name)"

@@ -8,5 +8,5 @@ import Foundation
 /// Format: `<date> <time> — <one-line tag>`. Time is wall clock
 /// of when the change was authored.
 enum BuildInfo {
-    static let signature = "2026-05-19i — proportionalPanes also hides control bar in single mode"
+    static let signature = "2026-05-26g — HostFormView gates Save on 1...65535 port range"
 }

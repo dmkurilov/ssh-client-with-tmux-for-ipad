@@ -242,8 +242,8 @@ struct TmuxBackendSessionView: View {
 
     private func renameSessionViaExec(old: String, new: String) async {
         guard let conn = connection else { return }
-        let oldEsc = shellEscape(old)
-        let newEsc = shellEscape(new)
+        let oldEsc = ShellQuoting.embeddedInSingle(old)
+        let newEsc = ShellQuoting.embeddedInSingle(new)
         let inner = "tmux rename-session -t \(oldEsc) \(newEsc) 2>/dev/null; true"
         _ = try? await conn.exec("$SHELL -lc '\(inner)'")
         if let refreshed = try? await probeSessions(conn: conn) {
@@ -281,7 +281,7 @@ struct TmuxBackendSessionView: View {
         do {
             if case .existing(let name, true) = choice {
                 FileLogger.shared.log("TmuxBackendView.attach: pre-detach existing client of '\(name)'")
-                let escaped = shellEscape(name)
+                let escaped = ShellQuoting.embeddedInSingle(name)
                 let inner = "tmux detach-client -s \(escaped) 2>/dev/null; true"
                 _ = try? await conn.exec("$SHELL -lc '\(inner)'")
             }
@@ -291,10 +291,10 @@ struct TmuxBackendSessionView: View {
             let cmd: String
             switch choice {
             case .existing(let name, _):
-                cmd = "tmux -CC attach-session -t \(shellEscape(name))\n"
+                cmd = "tmux -CC attach-session -t \(ShellQuoting.topLevel(name))\n"
             case .new(let maybeName):
                 if let name = maybeName, !name.isEmpty {
-                    cmd = "tmux -CC new-session -A -s \(shellEscape(name))\n"
+                    cmd = "tmux -CC new-session -A -s \(ShellQuoting.topLevel(name))\n"
                 } else {
                     cmd = "tmux -CC\n"
                 }
@@ -470,13 +470,9 @@ struct TmuxBackendSessionView: View {
         )
     }
 
-    private func shellEscape(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
 
     private func loadCredentials() async throws -> Credentials {
-        let id = host.keyID ?? keyStore.keys.first?.id
-        guard let id else {
+        guard let id = keyStore.resolveKeyID(preferred: host.keyID) else {
             throw NSError(
                 domain: "TmuxBackendSessionView",
                 code: -1,

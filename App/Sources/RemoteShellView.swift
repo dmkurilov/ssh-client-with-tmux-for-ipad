@@ -223,8 +223,7 @@ struct RemoteShellView: View {
     }
 
     private func loadCredentials() async throws -> Credentials {
-        let id = host.keyID ?? keyStore.keys.first?.id
-        guard let id else {
+        guard let id = keyStore.resolveKeyID(preferred: host.keyID) else {
             throw NSError(
                 domain: "RemoteShellView",
                 code: -1,

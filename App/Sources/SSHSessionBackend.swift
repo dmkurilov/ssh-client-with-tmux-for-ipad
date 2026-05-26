@@ -85,5 +85,19 @@ final class SSHSessionBackend: SessionBackend {
         await paneBackend.resize(cols: entry.cols, rows: entry.rows)
     }
 
+    /// Wrapper-view hook: the SSH output stream closed cleanly
+    /// (remote ended the channel). The wrapping view uses this to
+    /// flip its status message so foreground-reconnect knows the
+    /// session is gone. Forwarded straight to the pane.
+    func onStreamEnded(_ handler: @escaping @MainActor () -> Void) {
+        paneBackend.onStreamEnded = handler
+    }
+
+    /// Wrapper-view hook for pump errors (network drop, channel
+    /// reset). Same purpose as `onStreamEnded`; the error is
+    /// surfaced so the view can display it.
+    func onStreamError(_ handler: @escaping @MainActor (Error) -> Void) {
+        paneBackend.onStreamError = handler
+    }
 }
 #endif

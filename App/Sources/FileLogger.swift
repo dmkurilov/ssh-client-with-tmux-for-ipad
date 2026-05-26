@@ -32,6 +32,14 @@ final class FileLogger {
         )
         url = docs.appendingPathComponent("debug.log")
         formatter = DateFormatter()
+        // Pin to en_US_POSIX — see `TranscriptStore.timestampFormatter`
+        // for the long-form rationale. Short version: any
+        // `DateFormatter` with a fixed `dateFormat` must override
+        // the user-region locale or it emits non-Gregorian dates /
+        // non-ASCII digits on some devices. Debug log timestamps
+        // are the project's primary diagnostic surface; they have
+        // to be byte-identical regardless of the device's region.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "HH:mm:ss.SSS"
         self.enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
     }

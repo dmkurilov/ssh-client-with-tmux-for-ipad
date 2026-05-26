@@ -38,8 +38,17 @@ struct HostFormView: View {
         _keyID = State(initialValue: seed?.keyID ?? keyStore.keys.first?.id)
     }
 
+    /// Parsed port, or `nil` if the field is empty / non-numeric /
+    /// out of the valid TCP range. Both `canSave` and the Save
+    /// action read this so the form can't slip a 0 or 70000 past
+    /// the gate.
+    private var parsedPort: Int? {
+        guard let n = Int(port), (1...65535).contains(n) else { return nil }
+        return n
+    }
+
     private var canSave: Bool {
-        !host.isEmpty && !user.isEmpty && Int(port) != nil
+        !host.isEmpty && !user.isEmpty && parsedPort != nil
     }
 
     private var keyBinding: Binding<UUID?> {
@@ -92,7 +101,7 @@ struct HostFormView: View {
                         id: initial?.id ?? UUID(),
                         name: name.isEmpty ? host : name,
                         host: host,
-                        port: Int(port) ?? 22,
+                        port: parsedPort ?? 22,
                         user: user,
                         lastTmuxSession: initial?.lastTmuxSession,
                         keyID: keyID

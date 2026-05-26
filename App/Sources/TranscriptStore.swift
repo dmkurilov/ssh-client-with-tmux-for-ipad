@@ -162,6 +162,14 @@ final class TranscriptStore {
 
     private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
+        // Per Apple's `Date and Time Programming Guide` ("Working
+        // With Fixed Format Date Representations"), any `DateFormatter`
+        // with a custom `dateFormat` must use `en_US_POSIX` — without
+        // it the formatter applies the user's region overrides
+        // (Thai/Buddhist calendar, Hebrew calendar, Arabic numerals,
+        // etc.) and the "fixed" format produces filenames that vary
+        // by device locale and don't sort lexicographically.
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd-HHmmss"
         f.timeZone = TimeZone.current
         return f

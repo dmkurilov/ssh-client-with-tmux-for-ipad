@@ -237,12 +237,12 @@ final class TmuxSessionBackend: SessionBackend {
     }
 
     func renameWindow(_ windowID: Int, name: String) async {
-        await write("rename-window -t :@\(windowID) \(shellEscape(name))\n")
+        await write("rename-window -t :@\(windowID) \(ShellQuoting.topLevel(name))\n")
     }
 
     func renameSession(_ newName: String) async {
         guard let sid = tmux.sessionID else { return }
-        await write("rename-session -t $\(sid) \(shellEscape(newName))\n")
+        await write("rename-session -t $\(sid) \(ShellQuoting.topLevel(newName))\n")
     }
 
     func toggleZoom(paneID: Int) async {
@@ -668,9 +668,6 @@ final class TmuxSessionBackend: SessionBackend {
         }
     }
 
-    private func shellEscape(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
 }
 
 /// Per-pane I/O for the tmux backend. `driver` is the per-pane

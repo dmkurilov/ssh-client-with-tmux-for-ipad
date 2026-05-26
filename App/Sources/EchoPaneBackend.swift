@@ -7,15 +7,17 @@ import TerminalKit
 /// SwiftUI previews, and tests so we can iterate on UI without a
 /// live remote.
 ///
-/// The echo runs on its own `Task`; cancelling the pane (deinit)
-/// cancels in-flight echoes so a closed pane doesn't keep "typing"
-/// after the fact.
+/// Each echo runs on a fire-and-forget `Task` with a `[weak self]`
+/// capture, so when the pane is released the queued echoes become
+/// no-ops once their sleep elapses. We don't track the tasks (an
+/// earlier version did but only appended, never pruned — that
+/// turned every keystroke into a permanent Task reference for the
+/// pane's lifetime).
 @MainActor
 final class EchoPaneBackend: PaneBackend {
     let id: Int
     let driver: TerminalDriver
     let echoDelay: Duration
-    private var pendingTasks: [Task<Void, Never>] = []
 
     init(id: Int, echoDelay: Duration = .seconds(1)) {
         self.id = id
@@ -28,10 +30,6 @@ final class EchoPaneBackend: PaneBackend {
         driver.feed(Data(banner.utf8))
     }
 
-    // No `deinit`: `Task { [weak self] }` already drops cleanly when
-    // the pane is released, and `FileLogger.shared` is `@MainActor`-
-    // isolated so it isn't reachable from deinit anyway.
-
     func send(_ data: Data) async {
         FileLogger.shared.log("EchoPane[%\(id)].send \(data.count)B")
         // Translate CR → CRLF on echo. Enter sends `0x0D`; in a
@@ -42,13 +40,12 @@ final class EchoPaneBackend: PaneBackend {
         let echoed = Self.expandCarriageReturns(data)
         let id = self.id
         let delay = echoDelay
-        let task = Task { [weak self] in
+        Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
             self.driver.feed(echoed)
             FileLogger.shared.log("EchoPane[%\(id)].echo \(echoed.count)B")
         }
-        pendingTasks.append(task)
     }
 
     private static func expandCarriageReturns(_ data: Data) -> Data {

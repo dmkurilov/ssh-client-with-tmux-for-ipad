@@ -41,6 +41,16 @@ final class TmuxSession {
     @ObservationIgnored
     private var drivers: [Int: TerminalDriver] = [:]
 
+    /// In-flight "reap this orphaned pane after a short delay"
+    /// tasks, keyed by pane id. Used by the `%layout-change`
+    /// handler to defer driver teardown so a `move-pane` (which
+    /// emits two layout-changes — source removes, destination
+    /// adds — in unspecified order) doesn't lose the moved pane's
+    /// scrollback to a racy inline reap. Re-appearance of the
+    /// pane in any window's layout cancels the pending reap.
+    @ObservationIgnored
+    private var pendingReaps: [Int: Task<Void, Never>] = [:]
+
     /// Most recent control-mode lines (events + outgoing commands) for
     /// the on-screen debug log. NOT observed — appending used to
     /// trigger a SwiftUI body re-evaluation, which (combined with
@@ -108,6 +118,29 @@ final class TmuxSession {
             FileLogger.shared.log("[%\(paneID)] \(msg)")
         }
         return driver
+    }
+
+    /// Schedule `paneID`'s driver for teardown after a short delay,
+    /// re-checking at the deadline whether the pane is owned by any
+    /// surviving window. The delay is long enough to absorb tmux's
+    /// `move-pane` two-event sequence (source layout-change /
+    /// destination layout-change, emitted in either order) so a
+    /// moved pane keeps its scrollback, and short enough that a real
+    /// `kill-pane` reaps promptly.
+    private func scheduleReap(paneID: Int) {
+        pendingReaps[paneID]?.cancel()
+        pendingReaps[paneID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self else { return }
+            let stillOwned = self.windows.contains { win in
+                win.layout?.paneIDs.contains(paneID) ?? false
+            }
+            self.pendingReaps.removeValue(forKey: paneID)
+            guard !stillOwned else { return }
+            FileLogger.shared.log("TmuxSession.reap %\(paneID) (orphaned by layout-change)")
+            self.drivers.removeValue(forKey: paneID)
+            self.paneIDs.removeAll(where: { $0 == paneID })
+        }
     }
 
     /// Optimistically set the active pane of `windowID` without
@@ -266,6 +299,8 @@ final class TmuxSession {
         lastResponseLine = nil
         paneIDs = []
         drivers = [:]
+        for (_, task) in pendingReaps { task.cancel() }
+        pendingReaps = [:]
         if let p = pending {
             pending = nil
             p.continuation.resume(throwing: CommandError.streamClosed)
@@ -295,7 +330,30 @@ final class TmuxSession {
             // current session's link list at notification time —
             // happens at least when a tab closes while the active
             // window has already shifted away. Treat both the same.
+            //
+            // Snapshot the doomed window's pane ids *before* removal
+            // so we can tear down their per-pane drivers. Without
+            // this `drivers` and `paneIDs` grow unboundedly across
+            // tab-open/tab-close cycles; each driver also keeps its
+            // SwiftTerm replay buffer alive (default 100k cells) for
+            // panes that no longer exist server-side.
+            let doomedPanes = windows
+                .first(where: { $0.id == id })?
+                .layout?
+                .paneIDs ?? []
             windows.removeAll(where: { $0.id == id })
+            for pid in doomedPanes {
+                drivers.removeValue(forKey: pid)
+                // Cancel a pending deferred reap (from a prior
+                // layout-change) so the closed pane doesn't sit in
+                // pendingReaps until the sleep elapses.
+                pendingReaps[pid]?.cancel()
+                pendingReaps.removeValue(forKey: pid)
+            }
+            if !doomedPanes.isEmpty {
+                let stale = Set(doomedPanes)
+                paneIDs.removeAll(where: { stale.contains($0) })
+            }
             if activeWindowID == id {
                 activeWindowID = windows.first?.id
             }
@@ -308,6 +366,12 @@ final class TmuxSession {
 
         case .layoutChange(let wid, let layoutString, _, let flags):
             let parsed = try? TmuxLayout.parse(layoutString)
+            // Snapshot the previous pane set for this window before
+            // we overwrite the layout — we need it below to figure
+            // out which ids vanished and may need reaping.
+            let oldPanes = Set(
+                windows.first(where: { $0.id == wid })?.layout?.paneIDs ?? []
+            )
             updateWindow(wid) {
                 $0.layoutFlags = flags
                 $0.layout = parsed
@@ -315,11 +379,27 @@ final class TmuxSession {
             // Pre-create drivers + register paneIDs for any leaves we
             // haven't seen output from yet, so SwiftUI can mount the
             // SwiftTermView ahead of the first byte arriving.
+            // Any pane in the new layout also cancels its pending
+            // reap — handles the destination half of a `move-pane`.
             if let parsed {
                 for paneID in parsed.paneIDs where drivers[paneID] == nil {
                     drivers[paneID] = makeDriver(for: paneID)
                     paneIDs.append(paneID)
                 }
+                for paneID in parsed.paneIDs {
+                    pendingReaps[paneID]?.cancel()
+                    pendingReaps.removeValue(forKey: paneID)
+                }
+            }
+            // Schedule a deferred reap for ids that dropped out of
+            // this window's layout. The deferred task re-checks
+            // ownership at firing time — if the pane reappeared in
+            // any window (typical move-pane case), the reap is a
+            // no-op; if it stays orphaned (kill-pane case), the
+            // driver and paneID entry are dropped.
+            let newPanes = Set(parsed?.paneIDs ?? [])
+            for pid in oldPanes.subtracting(newPanes) {
+                scheduleReap(paneID: pid)
             }
 
         case .sessionChanged(let id, let name):

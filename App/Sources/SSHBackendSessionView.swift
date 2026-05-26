@@ -133,11 +133,26 @@ struct SSHBackendSessionView: View {
             let openedShell = try await conn.openShell()
             await MainActor.run {
                 self.shell = openedShell
-                self.backend = SSHSessionBackend(
+                let newBackend = SSHSessionBackend(
                     host: host.host,
                     user: host.user,
                     shell: openedShell
                 )
+                // Surface stream death so `reconnectIfNeeded` (fires
+                // on scene-active) sees a stale status and re-opens
+                // the channel. Without these hooks `statusMessage`
+                // stays at "connected" after the remote drops and
+                // the foreground-reconnect guard early-returns.
+                newBackend.onStreamEnded {
+                    FileLogger.shared.log("SSHBackendView.onStreamEnded")
+                    statusMessage = "stream ended"
+                }
+                newBackend.onStreamError { error in
+                    FileLogger.shared.log("SSHBackendView.onStreamError: \(error)")
+                    statusMessage = "disconnected"
+                    errorMessage = "stream error: \(error)"
+                }
+                self.backend = newBackend
                 self.statusMessage = "connected"
             }
             FileLogger.shared.log("SSHBackendView.connect: shell open")
@@ -151,8 +166,7 @@ struct SSHBackendSessionView: View {
     }
 
     private func loadCredentials() async throws -> Credentials {
-        let id = host.keyID ?? keyStore.keys.first?.id
-        guard let id else {
+        guard let id = keyStore.resolveKeyID(preferred: host.keyID) else {
             throw NSError(
                 domain: "SSHBackendSessionView",
                 code: -1,

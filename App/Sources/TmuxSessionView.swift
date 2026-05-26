@@ -443,7 +443,7 @@ struct TmuxSessionView: View {
         guard let id = renamingWindowID else { return }
         let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            sendShellCommand("rename-window -t :@\(id) \(shellEscape(trimmed))\n")
+            sendShellCommand("rename-window -t :@\(id) \(ShellQuoting.topLevel(trimmed))\n")
         }
         renamingWindowID = nil
         renameText = ""
@@ -460,7 +460,7 @@ struct TmuxSessionView: View {
         renamingSession = false
         sessionRenameText = ""
         guard !trimmed.isEmpty else { return }
-        sendShellCommand("rename-session -t $\(sid) \(shellEscape(trimmed))\n")
+        sendShellCommand("rename-session -t $\(sid) \(ShellQuoting.topLevel(trimmed))\n")
     }
 
     @ViewBuilder
@@ -1019,8 +1019,8 @@ struct TmuxSessionView: View {
     /// the picker shows the new name.
     private func renameSessionViaExec(old: String, new: String) async {
         guard let conn = connection else { return }
-        let oldEsc = shellEscape(old)
-        let newEsc = shellEscape(new)
+        let oldEsc = ShellQuoting.embeddedInSingle(old)
+        let newEsc = ShellQuoting.embeddedInSingle(new)
         let inner = "tmux rename-session -t \(oldEsc) \(newEsc) 2>/dev/null; true"
         _ = try? await conn.exec("$SHELL -lc '\(inner)'")
         if let refreshed = try? await probeSessions(conn: conn) {
@@ -1077,7 +1077,7 @@ struct TmuxSessionView: View {
             // we open our control-mode session. Has to happen on the
             // SSH `exec` channel because we're not in `-CC` mode yet.
             if case .existing(let name, true) = choice {
-                let escaped = shellEscape(name)
+                let escaped = ShellQuoting.embeddedInSingle(name)
                 let inner = "tmux detach-client -s \(escaped) 2>/dev/null; true"
                 _ = try? await conn.exec("$SHELL -lc '\(inner)'")
             }
@@ -1085,10 +1085,10 @@ struct TmuxSessionView: View {
             let cmd: String
             switch choice {
             case .existing(let name, _):
-                cmd = "tmux -CC attach-session -t \(shellEscape(name))\n"
+                cmd = "tmux -CC attach-session -t \(ShellQuoting.topLevel(name))\n"
             case .new(let maybeName):
                 if let name = maybeName, !name.isEmpty {
-                    cmd = "tmux -CC new-session -A -s \(shellEscape(name))\n"
+                    cmd = "tmux -CC new-session -A -s \(ShellQuoting.topLevel(name))\n"
                 } else {
                     cmd = "tmux -CC\n"
                 }
@@ -1249,16 +1249,8 @@ struct TmuxSessionView: View {
         )
     }
 
-    /// Wrap a session name in single quotes for the tmux command line.
-    /// Single-quote any single-quotes inside via the standard
-    /// `'\''` close-reopen trick.
-    private func shellEscape(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
     private func loadCredentials() async throws -> Credentials {
-        let id = host.keyID ?? keyStore.keys.first?.id
-        guard let id else {
+        guard let id = keyStore.resolveKeyID(preferred: host.keyID) else {
             throw NSError(
                 domain: "TmuxSessionView",
                 code: -1,

@@ -22,27 +22,76 @@ final class KeyStore {
 
     // MARK: - Mutation
 
+    /// Resolve a host's preferred key id to one that actually
+    /// exists. If `preferred` points to a key that's been deleted
+    /// (or is `nil`), fall back to the first available key. Returns
+    /// `nil` only when the store is empty.
+    ///
+    /// The host-detail UI already does this fallback when displaying
+    /// the "Key" row — without the same logic in `loadCredentials`,
+    /// the chrome shows a working default while every connection
+    /// attempt fails with "key not found in keychain".
+    func resolveKeyID(preferred: UUID?) -> UUID? {
+        if let id = preferred, keys.contains(where: { $0.id == id }) {
+            return id
+        }
+        return keys.first?.id
+    }
+
     @discardableResult
     func add(_ key: KeyMetadata, data: Data) throws -> KeyMetadata {
+        // Save private bytes to Keychain first — we'll roll this back
+        // if metadata persistence fails so we don't leak an orphaned
+        // Keychain entry that no metadata record points to.
         try KeychainKeyStore.shared.save(account: key.id.uuidString, data: data)
         keys.append(key)
-        try persist()
+        do {
+            try persist()
+        } catch {
+            // Roll back both the in-memory append and the Keychain
+            // entry we just wrote. Best-effort on the Keychain
+            // delete — if it fails we still propagate the original
+            // persist error to the caller, just with a tiny orphan
+            // entry left behind in the worst case.
+            keys.removeAll(where: { $0.id == key.id })
+            try? KeychainKeyStore.shared.delete(account: key.id.uuidString)
+            throw error
+        }
         return key
     }
 
     func remove(_ id: UUID) throws {
         guard let idx = keys.firstIndex(where: { $0.id == id }) else { return }
+        // Persist metadata removal *before* touching the Keychain.
+        // Reversing the original order (Keychain → persist) prevents
+        // the worst case where the Keychain entry is gone but
+        // metadata still references it — `load()` would then throw
+        // forever. With the new order, a persist failure leaves
+        // everything intact; a post-persist Keychain-delete failure
+        // leaves an orphan in the Keychain (harmless, the metadata
+        // says the key is gone).
+        let removed = keys.remove(at: idx)
+        do {
+            try persist()
+        } catch {
+            keys.insert(removed, at: idx)
+            throw error
+        }
         try KeychainKeyStore.shared.delete(account: id.uuidString)
-        keys.remove(at: idx)
-        try persist()
     }
 
     /// Rename an existing key. Identifier and Keychain entry are
     /// untouched — only the user-facing label changes.
     func rename(_ id: UUID, to newName: String) throws {
         guard let idx = keys.firstIndex(where: { $0.id == id }) else { return }
+        let oldName = keys[idx].name
         keys[idx].name = newName
-        try persist()
+        do {
+            try persist()
+        } catch {
+            keys[idx].name = oldName
+            throw error
+        }
     }
 
     // MARK: - Reading

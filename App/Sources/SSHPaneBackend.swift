@@ -20,6 +20,15 @@ final class SSHPaneBackend: PaneBackend {
 
     private let shell: SSHShellSession
     private var pumpTask: Task<Void, Never>?
+    /// Fires once when the SSH output stream finishes cleanly (remote
+    /// closed the channel). The wrapping view uses this to flip its
+    /// status message to "stream ended" so the foreground-reconnect
+    /// path knows there's no live session anymore.
+    var onStreamEnded: (@MainActor () -> Void)?
+    /// Fires once when the pump throws (network drop, channel
+    /// reset, etc.). Same purpose as `onStreamEnded` but carries the
+    /// underlying error for surfacing in the UI.
+    var onStreamError: (@MainActor (Error) -> Void)?
 
     init(id: Int, shell: SSHShellSession) {
         self.id = id
@@ -46,8 +55,10 @@ final class SSHPaneBackend: PaneBackend {
                     self?.driver.feed(data)
                 }
                 FileLogger.shared.log("SSHPane[%\(id)] stream ended")
+                self?.onStreamEnded?()
             } catch {
                 FileLogger.shared.log("SSHPane[%\(id)] pump error: \(error)")
+                self?.onStreamError?(error)
             }
         }
     }
