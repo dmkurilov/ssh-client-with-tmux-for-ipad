@@ -13,19 +13,34 @@ struct KeyMetadata: Codable, Identifiable, Hashable {
     /// available for in-app generated keys; optional for pasted ones.
     var publicKeyOpenSSH: String?
     let createdAt: Date
+    /// Most recent successful `KeyStore.load` for this key, used by
+    /// the Keys list to show "Last used …". Nil = never used since
+    /// import. Bumped + persisted on every load.
+    var lastUsedAt: Date?
+    /// `ssh-keygen -lf`-style SHA256 fingerprint:
+    /// `SHA256:<base64-no-padding>`. Computed once at import/generate
+    /// from the embedded OpenSSH public key bytes, so the value is
+    /// what the user would see in their terminal (and in a server's
+    /// `authorized_keys` log). Nil only for keys imported on older
+    /// builds — those backfill on first load.
+    var fingerprintSHA256: String?
 
     init(
         id: UUID = UUID(),
         name: String,
         format: KeyFormat,
         publicKeyOpenSSH: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        lastUsedAt: Date? = nil,
+        fingerprintSHA256: String? = nil
     ) {
         self.id = id
         self.name = name
         self.format = format
         self.publicKeyOpenSSH = publicKeyOpenSSH
         self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+        self.fingerprintSHA256 = fingerprintSHA256
     }
 }
 

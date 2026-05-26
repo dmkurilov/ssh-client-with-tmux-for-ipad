@@ -9,7 +9,6 @@ struct SettingsSheet: View {
     let keyStore: KeyStore
     let onDone: () -> Void
 
-    @State private var addingKey = false
     @State private var showingDemo = false
     @State private var buildCopied = false
     @Bindable private var transcripts = TranscriptStore.shared
@@ -27,33 +26,6 @@ struct SettingsSheet: View {
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
-                }
-
-                Section {
-                    if keyStore.keys.isEmpty {
-                        Text("No keys yet. Tap + to add one.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(keyStore.keys) { key in
-                            keyRow(key)
-                        }
-                        .onDelete { offsets in
-                            for idx in offsets {
-                                try? keyStore.remove(keyStore.keys[idx].id)
-                            }
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Text("SSH keys")
-                        Spacer()
-                        Button {
-                            addingKey = true
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                    }
                 }
 
                 Section {
@@ -133,9 +105,6 @@ struct SettingsSheet: View {
                     Button("Done", action: onDone)
                 }
             }
-            .sheet(isPresented: $addingKey) {
-                KeyFormView(store: keyStore) { addingKey = false }
-            }
             .sheet(isPresented: $consent.pendingPrompt) {
                 LongRunningRecordingSheet {
                     consent.pendingPrompt = false
@@ -175,27 +144,6 @@ struct SettingsSheet: View {
                 Text("Consent expires in \(formatExpiry(remaining))")
                     .font(.caption.monospaced())
                     .foregroundStyle(remaining < 60 ? .orange : .secondary)
-            }
-        }
-    }
-
-    private func keyRow(_ key: KeyMetadata) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(key.name)
-                    .font(.body.weight(.medium))
-                Spacer()
-                Text(key.format == .ed25519Raw ? "ed25519" : "OpenSSH PEM")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-            if let pub = key.publicKeyOpenSSH {
-                Text(pub)
-                    .font(.caption2.monospaced())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
             }
         }
     }

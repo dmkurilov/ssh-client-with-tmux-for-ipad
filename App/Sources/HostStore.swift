@@ -11,20 +11,7 @@ final class HostStore {
     private(set) var hosts: [Host]
 
     init() {
-        if let loaded = try? Self.load() {
-            self.hosts = loaded
-        } else if let seed = SmokeTestConfig.shared {
-            let host = Host(
-                name: seed.host,
-                host: seed.host,
-                port: seed.port,
-                user: seed.user
-            )
-            self.hosts = [host]
-            try? Self.save([host])
-        } else {
-            self.hosts = []
-        }
+        self.hosts = (try? Self.load()) ?? []
     }
 
     func add(_ host: Host) {

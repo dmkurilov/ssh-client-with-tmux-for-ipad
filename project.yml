@@ -12,12 +12,6 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1"
     CURRENT_PROJECT_VERSION: "1"
-    # Xcode 15+ defaults this to YES, which blocks the post-build
-    # SmokeTest credentials script from writing into the .app
-    # bundle (Sandbox: cp deny file-write-data ...). The script's
-    # writes are intentional and limited to the build product;
-    # turning sandboxing off unblocks the build.
-    ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 packages:
   Domain:
@@ -31,24 +25,6 @@ targets:
       - path: App/Sources
     resources:
       - path: App/Resources/Assets.xcassets
-    postBuildScripts:
-      - name: Copy SmokeTest credentials into bundle
-        basedOnDependencyAnalysis: false
-        script: |
-          set -e
-          # Read from outside the repo so sync mechanisms can't wipe these.
-          SRC="${HOME}/.ssh-client-tmux-smoke"
-          DEST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
-          echo "SmokeTest: source=$SRC"
-          echo "SmokeTest: dest=$DEST"
-          for f in config.json private-key; do
-            if [ -f "$SRC/$f" ]; then
-              cp "$SRC/$f" "$DEST/$f"
-              echo "SmokeTest:   ✓ copied $f"
-            else
-              echo "SmokeTest:   — skipped $f (not at $SRC/$f)"
-            fi
-          done
     info:
       path: App/Resources/Info.plist
       properties:
